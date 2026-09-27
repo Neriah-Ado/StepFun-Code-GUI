@@ -420,13 +420,46 @@ narrowing the window below 1080 px (where `.stage` collapses to a single column)
 
 ## License
 
-Released under the [MIT License](LICENSE).
+This project is released under the **GNU Affero General Public License v3
+(AGPL-3.0-only)**. The full text is in [LICENSE](LICENSE).
 
-```
-MIT License · Copyright (c) 2026 Neriah-Ado
-```
+Rationale for this choice: the project is delivered as a network service (a browser panel
+plus a local HTTP/SSE gateway), and AGPL-3.0 is the only mainstream licence that retains
+open-source reciprocity in the **network interaction** scenario — a user who merely accesses
+the software over a network, without distributing any binary, must still provide the complete
+corresponding source.
 
-Permission is granted, free of charge, to any person obtaining a copy of this software and its
-documentation to deal in it without restriction, including the rights to use, copy, modify,
-merge, publish, distribute, sublicense, and sell copies, subject to inclusion of the copyright
-and permission notices. The software is provided "as is", without warranty of any kind.
+### Obligations of users
+
+| Mode of use | Obligation |
+|---|---|
+| Running it yourself (including internally in production) | No additional obligation; free to use |
+| Distributing the software or a modified version | Must provide the **complete corresponding source** under AGPL-3.0, retain copyright and licence notices, and state the changes and their dates |
+| Distributing modifications | As above; the modifications are themselves bound by AGPL-3.0 (copyleft reciprocity) |
+| **Providing it as a network service** (section 13) | Must offer all remote users a **prominent way to obtain the corresponding source**, even without distributing a binary |
+| Integrating into another program | If the result is a derivative work, the whole work must be licensed under AGPL-3.0 |
+| Commercial use | **Permitted.** Charging fees and commercial purposes are allowed; the obligations above are not waived |
+
+### Principal restrictions
+
+- Copyright and licence notices may not be removed or circumvented;
+- Derivative works may not be relicensed under more permissive terms;
+- No further restrictions that conflict with this licence may be imposed (GPLv3 section 10);
+- On violation, the licence terminates automatically and must be reinstated by the copyright holder (section 8).
+
+### How this differs from GPL-3.0
+
+AGPL-3.0 adds section 13 to GPL-3.0: **providing the software over a network also triggers the
+source provision obligation**. Since this project's primary mode of use is a browser reaching
+the panel over the local network, GPL-3.0 would allow a user to offer the service without
+publishing the source; AGPL-3.0 closes that gap.
+
+> For clarity: AGPL-3.0 **permits** commercial use. If the objective is to prohibit others from
+> using it commercially, that objective is incompatible with the open-source definition and
+> would require a source-available licence such as PolyForm Noncommercial.
+
+### On copyright notices
+
+The `LICENSE` file at the repository root is the sole authoritative licence text; source files
+do not carry individual copyright headers. When distributing or modifying, retain the original
+licence there and state your changes as required by section 5(a).
