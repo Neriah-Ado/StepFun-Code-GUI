@@ -1,7 +1,11 @@
-# step-orchestra
+# StepFun Code-GUI
+
+**v1.0.0**
 
 Step Code 的**子代理编排可视化面板**。终端里跑的 `subagent` / `workflow` 编排，
 在浏览器里以液态玻璃界面实时呈现。
+
+> 内部包名为 `step-orchestra`；仓库与产品名称为 StepFun Code-GUI。
 
 ```
 Step Code 运行时 ──▶ TypeScript 扩展 ──▶ Go 网关 ──▶ 浏览器面板
