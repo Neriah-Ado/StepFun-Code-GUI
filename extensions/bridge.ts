@@ -37,10 +37,13 @@ export class Bridge {
 	private stdoutTail = "";
 	private pendingStdout = "";
 	private actionHandler: ((action: BridgeAction) => void) | null = null;
+	/** Invoked when a gateway is re-spawned after a previous one exited. */
+	private restartHandler: (() => void) | null = null;
 	private panelUrl: string | null = null;
 	private failureReason: string | null = null;
 	private warned = false;
 	private disposed = false;
+	private everStarted = false;
 
 	/** Launch the gateway if it is not already running. Safe to call repeatedly. */
 	start(): void {
@@ -72,14 +75,28 @@ export class Bridge {
 			return;
 		}
 
+		// Writing to a pipe whose reader died surfaces as an async EPIPE error on
+		// the stream, not a synchronous throw — without a listener it would be an
+		// uncaught exception inside the host process. Swallow it; `exit` handles
+		// the lifecycle, `send` re-checks writability before every write.
+		child.stdin?.on("error", () => {});
+		child.stdout?.on("error", () => {});
+		child.stderr?.on("error", () => {});
+
 		child.on("error", (error) => {
 			this.failureReason = `gateway error: ${error.message}`;
 			this.child = null;
 		});
 		child.on("exit", (code) => {
 			this.child = null;
-			if (!this.disposed && code !== 0 && code !== null) {
-				this.failureReason = `gateway exited with code ${code}`;
+			// A stale URL would point at a dead port/token; the re-spawn prints a
+			// fresh one and `/orchestra` must not keep serving the old.
+			this.panelUrl = null;
+			if (!this.disposed && code !== null) {
+				this.failureReason =
+					code === 0
+						? "gateway exited unexpectedly (code 0)"
+						: `gateway exited with code ${code}`;
 			}
 		});
 
@@ -90,6 +107,12 @@ export class Bridge {
 
 		this.child = child;
 		this.failureReason = null;
+
+		// A re-spawned gateway starts with empty state; let the owner replay
+		// session/history/usage so a surviving panel keeps its context.
+		const isRestart = this.everStarted;
+		this.everStarted = true;
+		if (isRestart) this.restartHandler?.();
 
 		for (const line of this.pending) child.stdin?.write(`${line}\n`);
 		this.pending.length = 0;
@@ -125,6 +148,11 @@ export class Bridge {
 	/** Register the reverse-channel handler for gateway-originated actions. */
 	onAction(handler: (action: BridgeAction) => void): void {
 		this.actionHandler = handler;
+	}
+
+	/** Register a callback fired whenever the gateway is re-spawned mid-session. */
+	onRestart(handler: () => void): void {
+		this.restartHandler = handler;
 	}
 
 	/** Panel URL, available once the gateway has printed it. */

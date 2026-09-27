@@ -1,6 +1,6 @@
 # StepFun Code-GUI
 
-**v1.0.0** · [简体中文](README.md) | [English](README.en.md)
+**v1.5.0** · [简体中文](README.md) | [English](README.en.md)
 
 An orchestration visualisation panel for Step Code. `subagent` and `workflow` runs
 executing in the terminal are rendered live in the browser as a liquid-glass interface.

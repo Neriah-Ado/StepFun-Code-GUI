@@ -25,6 +25,8 @@ import {
 	type ProgressSnapshot,
 	type ToolCallMessage,
 	type ToolResultMessage,
+	type ToolUpdateMessage,
+	type UsageEvent,
 } from "./types.ts";
 
 /** Synthetic root: every tool observed in this process belongs to the main agent. */
@@ -85,6 +87,36 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 
 	const emit = (message: BridgeMessage): void => bridge.send(message);
 
+	// ------------------------------------------------- progress update coalescing
+	//
+	// The host can emit `tool_execution_update` far faster than any observer
+	// needs it: each frame carries a full progress snapshot, so only the newest
+	// per tool call matters. A short trailing window keeps the panel live while
+	// bounding the stdin/SSE/DOM pipeline to one frame per tool per window.
+	const UPDATE_COALESCE_MS = 60;
+	const pendingUpdates = new Map<
+		string,
+		{ message: ToolUpdateMessage; timer: ReturnType<typeof setTimeout> }
+	>();
+
+	function flushToolUpdate(toolCallId: string): void {
+		const pending = pendingUpdates.get(toolCallId);
+		if (!pending) return;
+		pendingUpdates.delete(toolCallId);
+		emit(pending.message);
+	}
+
+	function emitToolUpdate(message: ToolUpdateMessage): void {
+		const pending = pendingUpdates.get(message.toolCallId);
+		if (pending) clearTimeout(pending.timer);
+
+		const timer = setTimeout(() => flushToolUpdate(message.toolCallId), UPDATE_COALESCE_MS);
+		// Never hold the host process open just to flush a progress frame.
+		(timer as unknown as { unref?: () => void }).unref?.();
+
+		pendingUpdates.set(message.toolCallId, { message, timer });
+	}
+
 	// The conversation mirror needs `ctx.isIdle()` to pick a delivery mode, but
 	// actions arrive outside any event handler. Cache the newest context seen —
 	// `ctx.isIdle` is a live method call, so a stale object still reports truth.
@@ -106,6 +138,12 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 	const tracker = createTurnTracker();
 	let sessionOutput = 0;
 
+	// State a re-spawned gateway needs to look alive again: the session header,
+	// the history source, and the newest usage reading.
+	let lastSession: BridgeMessage | null = null;
+	let lastHistory: readonly unknown[] | null = null;
+	let lastUsage: UsageEvent["usage"] | null = null;
+
 	// The only reverse channel: browser → gateway stdout → here.
 	bridge.onAction((action) => {
 		if (action.action === "apply_profile") {
@@ -113,6 +151,14 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 			return;
 		}
 		conversation.handleAction(action);
+	});
+
+	// A crashed gateway takes its in-memory state with it. Profiles reload from
+	// disk on their own; everything else is replayed here.
+	bridge.onRestart(() => {
+		if (lastSession) emit(lastSession);
+		if (lastHistory) conversation.hydrate(lastHistory);
+		if (lastUsage) emit({ kind: "usage", ts: Date.now(), usage: lastUsage });
 	});
 
 	// Bring the gateway up eagerly so the panel URL exists before the first turn.
@@ -131,13 +177,15 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 				? context.sessionManager.getSessionId()
 				: undefined;
 
-		emit({
+		const sessionMessage: BridgeMessage = {
 			kind: "session",
 			ts: Date.now(),
 			sessionId: firstString(fromManager, record?.sessionId, record?.id) || "session",
 			cwd: firstString(context?.cwd, record?.cwd) || process.cwd(),
 			model: modelName(context),
-		});
+		};
+		lastSession = sessionMessage;
+		emit(sessionMessage);
 
 		latestContext = context ?? latestContext;
 
@@ -145,10 +193,18 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 		tracker.reset();
 		sessionOutput = 0;
 
-		// Replay prior turns so a freshly opened panel is not blank.
+		// Replay prior turns so a freshly opened panel is not blank. A throwing
+		// host accessor must not break the session_start dispatch.
 		const manager = context?.sessionManager;
-		const entries = manager?.buildContextEntries?.() ?? manager?.getBranch?.();
-		if (Array.isArray(entries)) conversation.hydrate(entries);
+		try {
+			const entries = manager?.buildContextEntries?.() ?? manager?.getBranch?.();
+			if (Array.isArray(entries)) {
+				lastHistory = entries;
+				conversation.hydrate(entries);
+			}
+		} catch (error) {
+			process.stderr.write(`[step-orchestra] history replay failed: ${String(error)}\n`);
+		}
 	});
 
 	pi.on("session_shutdown", () => {
@@ -257,7 +313,7 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 		// Updates that carry neither counters nor agent rows are of no interest.
 		if (!extracted.progress && !extracted.agents) return;
 
-		emit({
+		emitToolUpdate({
 			kind: "tool_update",
 			ts: Date.now(),
 			toolCallId,
@@ -275,6 +331,9 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 
 		const call = tracked.get(toolCallId);
 		tracked.delete(toolCallId);
+
+		// The terminal frame must not overtake a coalesced progress snapshot.
+		flushToolUpdate(toolCallId);
 
 		const usage = asRecord(record?.usage);
 		const inputTokens = numberOr(usage?.input, usage?.inputTokens, usage?.promptTokens);
@@ -362,7 +421,7 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 		// With no reading at all there is nothing worth pushing.
 		if (used === undefined && limit === undefined && !turn) return;
 
-		emit({
+		const usageEvent: UsageEvent = {
 			kind: "usage",
 			ts: Date.now(),
 			usage: {
@@ -373,7 +432,9 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 				turn,
 				at: Date.now(),
 			},
-		});
+		};
+		lastUsage = usageEvent.usage;
+		emit(usageEvent);
 	}
 }
 

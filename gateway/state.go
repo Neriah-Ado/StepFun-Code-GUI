@@ -99,7 +99,7 @@ type Stats struct {
 type Snapshot struct {
 	Session       Session               `json:"session"`
 	Run           RunView               `json:"run"`
-	Nodes         []*Node               `json:"nodes"`
+	Nodes         []Node                `json:"nodes"`
 	Messages      []ConversationMessage `json:"messages"`
 	Profiles      []profileView         `json:"profiles"`
 	ActiveProfile string                `json:"activeProfileId"`
@@ -188,6 +188,11 @@ type Store struct {
 	/** Monotonic frame counter, see emit. */
 	seq int64
 }
+
+// Soft ceiling on retained nodes so a very long session cannot grow the
+// gateway's memory (and every future snapshot) without bound. Terminal nodes
+// are evicted oldest-first; running and pending work is never dropped.
+const maxNodes = 1000
 
 func NewStore(hub *Hub, profileDir string) *Store {
 	return &Store{
@@ -319,13 +324,40 @@ func (s *Store) applyToolCall(message incoming) {
 	}
 
 	s.mu.Lock()
-	if _, exists := s.nodes[node.ID]; !exists {
-		s.order = append(s.order, node.ID)
-	}
-	s.nodes[node.ID] = node
+	s.retainLocked(node)
 	s.mu.Unlock()
 
 	s.publishNode(node)
+}
+
+// retainLocked registers a node under the size cap. Eviction only walks the
+// front of the order list when the cap is actually exceeded, so the common
+// path stays O(1); a scan that finds nothing evictable leaves the tree intact.
+func (s *Store) retainLocked(node *Node) {
+	if _, exists := s.nodes[node.ID]; !exists {
+		s.order = append(s.order, node.ID)
+		for len(s.order) > maxNodes {
+			victim := -1
+			for index, id := range s.order {
+				candidate := s.nodes[id]
+				if candidate == nil {
+					victim = index
+					break
+				}
+				if candidate.Status == StatusDone || candidate.Status == StatusFailed ||
+					candidate.Status == StatusCancelled {
+					victim = index
+					break
+				}
+			}
+			if victim < 0 {
+				break
+			}
+			delete(s.nodes, s.order[victim])
+			s.order = append(s.order[:victim], s.order[victim+1:]...)
+		}
+	}
+	s.nodes[node.ID] = node
 }
 
 func (s *Store) applyToolUpdate(message incoming) {
@@ -347,8 +379,7 @@ func (s *Store) applyToolUpdate(message incoming) {
 			StartedAt:     orNow(message.TS),
 			Orchestration: true,
 		}
-		s.order = append(s.order, node.ID)
-		s.nodes[node.ID] = node
+		s.retainLocked(node)
 	}
 
 	if message.Progress != nil {
@@ -412,14 +443,20 @@ func (s *Store) setRun(status, phase string) {
 }
 
 // Snapshot returns a consistent copy of the whole tree.
+//
+// Nodes are VALUE copies taken under the lock. The HTTP layer marshals
+// snapshots outside the lock while the stdin reader keeps folding updates
+// into the live nodes; handing out pointers would be a data race (and torn
+// JSON). A shallow copy is enough: every slice/pointer field of Node is
+// replaced wholesale on update, never mutated in place.
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nodes := make([]*Node, 0, len(s.order))
+	nodes := make([]Node, 0, len(s.order))
 	for _, id := range s.order {
 		if node := s.nodes[id]; node != nil {
-			nodes = append(nodes, node)
+			nodes = append(nodes, *node)
 		}
 	}
 
@@ -491,15 +528,18 @@ func (s *Store) publishSnapshot() {
 
 // emit broadcasts one delta with the next sequence number.
 //
+// Sequence assignment, marshalling, and the broadcast happen under one lock so
+// frames reach the hub in seq order even when HTTP handlers and the stdin
+// reader emit concurrently — otherwise a client could observe seq 6 before 5
+// and misread the inversion as a gap.
+//
 // The hub drops frames for a slow reader rather than blocking the event loop,
 // so the sequence is what lets a client detect the gap and resynchronise.
 func (s *Store) emit(kind string, payload any) {
 	s.mu.Lock()
 	s.seq++
-	seq := s.seq
+	frame, err := json.Marshal(Frame{Type: kind, Payload: payload, TS: nowMs(), Seq: s.seq})
 	s.mu.Unlock()
-
-	frame, err := json.Marshal(Frame{Type: kind, Payload: payload, TS: nowMs(), Seq: seq})
 	if err != nil {
 		return
 	}

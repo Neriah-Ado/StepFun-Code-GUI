@@ -173,6 +173,7 @@
 		card.dataset.nodeId = node.id;
 
 		card.appendChild(el("span", "node-rail")).setAttribute("aria-hidden", "true");
+		card.appendChild(el("span", "card-glow")).setAttribute("aria-hidden", "true");
 
 		var iconBox = el("span", "node-icon");
 		iconBox.appendChild(iconNode(node.toolName));
@@ -238,16 +239,32 @@
 			if (tokenTotal) meta.appendChild(el("span", "pill", formatTokens(tokenTotal) + " tok"));
 		}
 
+		// The right slot updates in place: rebuilding the ring SVG every frame
+		// would discard its stroke-dashoffset transition, so the offset is set
+		// on the existing element and only presence is managed here.
 		var right = card.querySelector(".node-right");
-		right.textContent = "";
-
 		var ratio = ratioOf(node);
-		if (ratio !== null && node.status === "running") {
-			right.appendChild(progressRing(ratio));
+		var wantRing = ratio !== null && node.status === "running";
+		var ring = right.querySelector(".ring");
+
+		if (wantRing && !ring) {
+			right.insertBefore(progressRing(ratio), right.firstChild);
+		} else if (wantRing && ring) {
+			ring.querySelector(".ring-fill").setAttribute(
+				"stroke-dashoffset",
+				(RING_CIRCUMFERENCE * (1 - ratio)).toFixed(2)
+			);
+		} else if (!wantRing && ring) {
+			ring.remove();
 		}
 
 		var time = node.status === "running" && node.startedAt ? Date.now() - node.startedAt : node.durationMs;
-		right.appendChild(el("span", "node-time", formatDuration(time)));
+		var timeEl = right.querySelector(".node-time");
+		if (!timeEl) {
+			timeEl = el("span", "node-time");
+			right.appendChild(timeEl);
+		}
+		timeEl.textContent = formatDuration(time);
 	}
 
 	// --------------------------------------------------------------- leaf card
@@ -258,6 +275,7 @@
 		card.setAttribute("role", "treeitem");
 
 		card.appendChild(el("span", "node-rail")).setAttribute("aria-hidden", "true");
+		card.appendChild(el("span", "card-glow")).setAttribute("aria-hidden", "true");
 
 		var pip = el("span", "agent-pip");
 		card.appendChild(pip);
@@ -330,7 +348,14 @@
 				entry.leafCards.set(key, card);
 			}
 			updateLeaf(card, agent);
-			entry.leaves.appendChild(card);
+
+			// Only touch the DOM when the card is not already at its position:
+			// re-appending an attached element cancels and restarts its CSS
+			// animation, so an unconditional appendChild would make the whole
+			// agent grid blink on every progress frame.
+			if (entry.leaves.children[index] !== card) {
+				entry.leaves.insertBefore(card, entry.leaves.children[index] || null);
+			}
 		});
 
 		entry.leafCards.forEach(function (card, key) {
@@ -351,6 +376,7 @@
 			var card = el("div", "node-card root-card");
 			card.setAttribute("role", "treeitem");
 			card.appendChild(el("span", "node-rail")).setAttribute("aria-hidden", "true");
+			card.appendChild(el("span", "card-glow")).setAttribute("aria-hidden", "true");
 
 			var iconBox = el("span", "node-icon");
 			iconBox.appendChild(iconNode("default"));
@@ -406,8 +432,9 @@
 	}
 
 	/**
-	 * Full structural render. Reuses cached elements so only genuinely new nodes
-	 * play their entrance animation.
+	 * Full structural render, done incrementally: cached branches are moved
+	 * only when their position actually changed, so surviving cards keep their
+	 * animation state and only genuinely new nodes play the entrance.
 	 */
 	function render(container, state, options) {
 		var nodes = state.nodes || [];
@@ -416,21 +443,28 @@
 		});
 
 		var scrollTop = container.scrollTop;
-		var fragment = document.createDocumentFragment();
 		var seen = new Set();
 
-		fragment.appendChild(updateRoot(state, visible.length, nodes.length).branch);
+		var root = updateRoot(state, visible.length, nodes.length).branch;
+		if (container.firstChild !== root) {
+			container.insertBefore(root, container.firstChild);
+		}
 
+		var position = 1;
 		visible.forEach(function (node) {
 			var entry = ensureBranch(node);
 			updateCard(entry.card, node);
 			syncLeaves(entry, node.agents);
-			fragment.appendChild(entry.branch);
+			if (container.children[position] !== entry.branch) {
+				container.insertBefore(entry.branch, container.children[position] || null);
+			}
+			position += 1;
 			seen.add(node.id);
 		});
 
-		while (container.firstChild) container.removeChild(container.firstChild);
-		container.appendChild(fragment);
+		while (container.children.length > position) {
+			container.removeChild(container.lastChild);
+		}
 		container.scrollTop = scrollTop;
 
 		cache.forEach(function (entry, key) {
@@ -471,6 +505,8 @@
 		upsert: upsert,
 		reset: reset,
 		formatTokens: formatTokens,
-		formatDuration: formatDuration
+		formatDuration: formatDuration,
+		progressKey: progressKey,
+		visibleCount: countVisible
 	};
 })(window);

@@ -1,6 +1,6 @@
 # StepFun Code-GUI
 
-**v1.0.0** · [简体中文](README.md) | [English](README.en.md)
+**v1.5.0** · [简体中文](README.md) | [English](README.en.md)
 
 Step Code 的子代理编排可视化面板。终端中运行的 `subagent` / `workflow` 编排，
 以液态玻璃界面在浏览器中实时呈现。
@@ -172,8 +172,9 @@ thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈�
 
 上述反向通道为系统内唯一的下行路径：stdin 承载上行事件，stdout 承载下行指令。
 
-发送按钮的禁用条件为复合判定：输入为空、agent 处于忙碌状态（`ctx.isIdle()` 为 false）、
-或事件流断开。agent 忙碌时发送不会失败，扩展将自动降级为 `deliverAs: "followUp"` 排队等待。
+发送按钮的禁用条件为复合判定：输入为空，或事件流断开。**agent 忙碌时仍可发送**：
+扩展将自动降级为 `deliverAs: "followUp"` 排队等待；消息在本地先以半透明「待达」
+气泡回显，宿主回放后原位替换，发送失败时原文回填输入框。
 
 消息气泡按 id 复用 DOM，流式更新仅修改文本节点，不重建列表。滚动采用贴底策略
 （距底部不足 72 px 时自动跟随，否则显示「回到底部」按钮），避免打断向上翻阅。
@@ -288,6 +289,7 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 | 立体感 | 卡片跟随 `--rx` / `--ry` 产生不超过 4.5° 的视差倾斜 |
 | 液态形变 | 空状态光环应用 SVG `feTurbulence` 与 `feDisplacementMap` |
 | 性能护栏 | rAF 合并指针事件；节点入场动画采用 `backwards` 而非 `both`（后者会锁定 `transform` 导致悬停失效）；`contain: layout paint` |
+| GPU 护栏 | `backdrop-filter` 只保留在 topbar 与两块面板等大面上，节点卡片不用（逐卡背景采样是规模下的主要开销）；运行节点的「呼吸」动画只驱动专用覆盖层的 `opacity`，不逐帧重绘 `box-shadow`；卡片无常驻 `will-change` |
 | 降级 | `@supports not (backdrop-filter)` 时降为高不透明纯色面板；`prefers-reduced-motion` 下关闭全部动效 |
 
 > 真实折射需要扭曲背景内容，而 CSS 无法对 `backdrop` 施加位移滤镜。
@@ -387,6 +389,7 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 |---|---|
 | `/orchestra` 提示 binary missing | 网关未构建，执行 `cd gateway && go build -o ../bin/step-orchestra-gateway .` |
 | 面板持续显示「连接中」 | 检查 URL 中 `t` 参数是否完整；token 每次运行均会变化 |
+| 面板显示「会话已失效」 | 网关进程已重启并更换了 token，重新运行 `/orchestra` 打印新地址后打开 |
 | 节点未出现 | 确认触发的是 `subagent` / `workflow`；普通工具调用需关闭「仅编排」筛选 |
 | 端口被占用 | 通过 `STEP_ORCHESTRA_PORT=50000` 环境变量覆盖起始端口 |
 | 自定义网关路径 | 通过 `STEP_ORCHESTRA_BIN=/path/to/gateway` 环境变量覆盖 |

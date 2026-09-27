@@ -119,19 +119,22 @@ func readStdin(store *Store) {
 		}
 	}()
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+	// A hand-rolled reader instead of bufio.Scanner: once Scanner hits a line
+	// longer than its buffer it is permanently dead, and the only recovery is
+	// exiting. Here an oversized line is drained chunk by chunk and skipped.
+	reader := bufio.NewReaderSize(os.Stdin, 256*1024)
+	var line []byte
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	handle := func(raw []byte) {
+		text := strings.TrimSpace(string(raw))
+		if text == "" {
+			return
 		}
 
 		var message incoming
-		if err := json.Unmarshal([]byte(line), &message); err != nil {
+		if err := json.Unmarshal([]byte(text), &message); err != nil {
 			log.Printf("dropping malformed line: %v", err)
-			continue
+			return
 		}
 
 		if message.Kind == "shutdown" {
@@ -140,6 +143,38 @@ func readStdin(store *Store) {
 		}
 
 		store.Apply(message)
+	}
+
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			line = append(line, chunk...)
+			if len(line) > maxLineBytes {
+				discarded := len(line)
+				line = line[:0]
+				for err == bufio.ErrBufferFull {
+					chunk, err = reader.ReadSlice('\n')
+					discarded += len(chunk)
+				}
+				log.Printf("dropping oversized line (%d bytes)", discarded)
+			}
+			if err != nil {
+				break
+			}
+			continue
+		}
+
+		line = append(line, chunk...)
+		// handle copies out of the buffer before returning, so it is safe to reuse.
+		handle(line)
+		line = line[:0]
+
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("stdin read error: %v", err)
+			}
+			break
+		}
 	}
 
 	log.Printf("stdin closed; exiting")
@@ -366,7 +401,11 @@ func newRouter(store *Store, hub *Hub, actions *actionWriter, token, webDir stri
 		_ = json.NewEncoder(w).Encode(store.Snapshot())
 	})
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		fmt.Fprintf(w, "ok clients=%d\n", hub.Count())
 	})
 
@@ -389,15 +428,19 @@ func serveEvents(w http.ResponseWriter, r *http.Request, store *Store, hub *Hub)
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// Subscribe BEFORE building the snapshot: frames broadcast in between land
+	// in the channel buffer and are replayed after the initial frame. Any that
+	// the snapshot already covers are dropped client-side as stale (their seq
+	// is <= the snapshot's), so the ordering is safe in both directions.
+	channel := hub.Subscribe()
+	defer hub.Unsubscribe(channel)
+
 	if payload, err := json.Marshal(store.SnapshotFrame()); err == nil {
 		if _, err := w.Write(sseFrame(payload)); err != nil {
 			return
 		}
 	}
 	flusher.Flush()
-
-	channel := hub.Subscribe()
-	defer hub.Unsubscribe(channel)
 
 	ticker := time.NewTicker(heartbeat)
 	defer ticker.Stop()

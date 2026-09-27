@@ -1,6 +1,6 @@
 {
 	"name": "step-orchestra",
-	"version": "1.0.0",
+	"version": "1.5.0",
 	"private": true,
 	"license": "AGPL-3.0-only",
 	"description": "Step Code 子代理编排可视化面板：液态玻璃界面、GUI 对话、API 配置切换与 Token 用量监控",

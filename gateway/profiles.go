@@ -277,7 +277,9 @@ func classifyProfile(profile storedProfile) string {
 	return "ok"
 }
 
-// maskKey renders a key for display only: "sk-abcd…wxyz".
+// maskKey renders a key for display only: "sk-abcd…wxyz". Short keys get a
+// tighter mask — a 12-character key would otherwise reveal 8 of its 12
+// characters, which is a hint rather than a mask.
 func maskKey(key string) string {
 	trimmed := strings.TrimSpace(key)
 	if trimmed == "" {
@@ -285,6 +287,9 @@ func maskKey(key string) string {
 	}
 	if len(trimmed) <= 8 {
 		return "…"
+	}
+	if len(trimmed) < 24 {
+		return trimmed[:2] + "…" + trimmed[len(trimmed)-2:]
 	}
 	return trimmed[:4] + "…" + trimmed[len(trimmed)-4:]
 }

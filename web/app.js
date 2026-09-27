@@ -76,18 +76,56 @@
 
 	// ----------------------------------------------------------------- painting
 
-	var renderQueued = false;
+	// One rAF queue for everything the event stream touches. SSE frames can
+	// arrive far faster than frames should render; structural changes and
+	// per-node updates are coalesced here so chrome stats and the tree are
+	// touched at most once per display frame.
+	var updateQueued = false;
+	var structuralDirty = false;
+	var dirtyNodeIds = new Set();
 
 	function scheduleRender() {
-		if (renderQueued) return;
-		renderQueued = true;
-		global.requestAnimationFrame(function () {
-			renderQueued = false;
-			tree.render(els.tree, state, options);
-			els.empty.hidden = state.nodes.length > 0;
-			updateChrome();
-		});
+		structuralDirty = true;
+		scheduleFlush();
 	}
+
+	function scheduleNodeUpdate(id) {
+		dirtyNodeIds.add(id);
+		scheduleFlush();
+	}
+
+	function scheduleFlush() {
+		if (updateQueued) return;
+		updateQueued = true;
+		global.requestAnimationFrame(flushUpdates);
+	}
+
+	function flushUpdates() {
+		updateQueued = false;
+		var selectedDirty = selectedId !== null && dirtyNodeIds.has(selectedId);
+		var structural = structuralDirty;
+		var hasUpdates = dirtyNodeIds.size > 0;
+
+		if (structural) {
+			structuralDirty = false;
+			dirtyNodeIds.clear();
+			tree.render(els.tree, state, options);
+			// Judge emptiness against the filtered view: with "仅编排" on and no
+			// orchestration nodes yet, a hint beats a blank panel.
+			els.empty.hidden = tree.visibleCount(state, options) > 0;
+		} else if (hasUpdates) {
+			dirtyNodeIds.forEach(function (id) {
+				var node = nodeIndex.get(id);
+				if (node) tree.upsert(els.tree, state, options, node);
+			});
+			dirtyNodeIds.clear();
+		}
+
+		if (structural || hasUpdates) updateChrome();
+		if (selectedDirty) renderInspector();
+	}
+
+	var lastStats = { total: 0, orchestrations: 0, running: 0, completed: 0, failed: 0, tokenSpend: 0 };
 
 	function computeStats() {
 		var stats = { total: 0, orchestrations: 0, running: 0, completed: 0, failed: 0, tokenSpend: 0 };
@@ -110,6 +148,7 @@
 
 	function updateChrome() {
 		var stats = computeStats();
+		lastStats = stats;
 
 		els.running.textContent = String(stats.running);
 		els.completed.textContent = String(stats.completed);
@@ -183,15 +222,10 @@
 		}
 		nodeIndex.set(node.id, node);
 
-		if (selectedId === node.id) renderInspector();
-
-		// First sighting changes the tree structure; later frames update in place.
-		if (index === -1) {
-			scheduleRender();
-		} else {
-			tree.upsert(els.tree, state, options, node);
-			updateChrome();
-		}
+		// First sighting changes the tree structure; later frames update in
+		// place — both funnel through the same rAF flush.
+		if (index === -1) scheduleRender();
+		else scheduleNodeUpdate(node.id);
 	}
 
 	function handleRun(run) {
@@ -237,14 +271,6 @@
 	function formatSeconds(ms) {
 		if (typeof ms !== "number" || !isFinite(ms) || ms < 0) return null;
 		return (ms / 1000).toFixed(1) + "s";
-	}
-
-	function formatClock(timestamp) {
-		var date = new Date(Number(timestamp) || Date.now());
-		var pad = function (value) {
-			return String(value).padStart(2, "0");
-		};
-		return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
 	}
 
 	function handleUsage(usage) {
@@ -330,12 +356,24 @@
 		if (!frame || !frame.type) return;
 
 		if (typeof frame.seq === "number") {
-			if (lastSeq !== 0 && frame.seq !== lastSeq + 1) {
+			if (frame.type === "snapshot") {
+				// A snapshot re-anchors the sequence — after a reconnect or a
+				// gateway restart the counter may legitimately move backwards.
 				lastSeq = frame.seq;
-				resync();
-				return;
+			} else if (lastSeq !== 0) {
+				// Frames buffered between subscribe and snapshot are replayed
+				// after it; the snapshot already carries their effects, so
+				// anything not ahead of lastSeq is a stale duplicate.
+				if (frame.seq <= lastSeq) return;
+				if (frame.seq !== lastSeq + 1) {
+					lastSeq = frame.seq;
+					resync();
+					return;
+				}
+				lastSeq = frame.seq;
+			} else {
+				lastSeq = frame.seq;
 			}
-			lastSeq = frame.seq;
 		}
 
 		switch (frame.type) {
@@ -370,12 +408,16 @@
 
 	function handleActionAck(payload) {
 		if (!payload || payload.ok) return;
-		chat.showError("发送失败：" + (payload.error || "未知原因"));
+		// The matching local echo is retired and its text returned to the composer.
+		chat.failPending("发送失败：" + (payload.error || "未知原因"));
 	}
 
 	// The composer hands us raw text; the gateway relays it to the extension,
-	// which calls pi.sendUserMessage on the host.
+	// which calls pi.sendUserMessage on the host. The message is echoed
+	// locally right away so a slow host never looks like a dropped send.
 	chat.onSend = function (text) {
+		chat.beginPending(text);
+
 		global
 			.fetch("/api/send?t=" + encodeURIComponent(token), {
 				method: "POST",
@@ -386,7 +428,7 @@
 				if (!response.ok) throw new Error("HTTP " + response.status);
 			})
 			.catch(function () {
-				chat.showError("发送失败：编排网关未响应。");
+				chat.failPending("发送失败：编排网关未响应。");
 			});
 	};
 
@@ -430,10 +472,41 @@
 		setMode(els.modeSwitch.dataset.target);
 	});
 
+	var source = null;
+	var authCheckTimer = 0;
+
+	/**
+	 * EventSource cannot see HTTP status codes. When the stream drops, a quick
+	 * snapshot probe tells a 401 (gateway restarted with a fresh token — the
+	 * tab can never recover by itself) apart from ordinary network loss, which
+	 * EventSource retry handles on its own.
+	 */
+	function scheduleAuthCheck() {
+		if (authCheckTimer) return;
+		authCheckTimer = global.setTimeout(function () {
+			authCheckTimer = 0;
+			global
+				.fetch("/api/snapshot?t=" + encodeURIComponent(token), {
+					headers: { "X-Orchestra-Token": token },
+				})
+				.then(function (response) {
+					if (response.status !== 401) return;
+					if (source) {
+						source.close();
+						source = null;
+					}
+					setLive("down", "会话已失效，请重新运行 /orchestra 打开新面板");
+				})
+				.catch(function () {
+					// Gateway unreachable: keep the EventSource retry loop going.
+				});
+		}, 2000);
+	}
+
 	function connect() {
 		setLive("connecting", "连接中");
 
-		var source = new EventSource("/events?t=" + encodeURIComponent(token));
+		source = new EventSource("/events?t=" + encodeURIComponent(token));
 
 		source.onopen = function () {
 			setLive("live", "实时");
@@ -452,15 +525,52 @@
 		// EventSource retries on its own; only surface that there is a gap.
 		source.onerror = function () {
 			setLive("down", "重连中");
+			scheduleAuthCheck();
 		};
 	}
 
 	// ---------------------------------------------------------------- inspector
 
-	function renderInspector() {
+	/**
+	 * Change signature of the inspector content. Progress frames for the
+	 * selected node arrive many times per second; without the gate each one
+	 * would rebuild the whole panel (args JSON, up to 200 agent rows).
+	 */
+	var inspectorSignature = null;
+
+	function inspectorKey(node) {
+		var agentShape = "";
+		if (node.agents && node.agents.length) {
+			agentShape = node.agents
+				.map(function (agent) {
+					return (agent.status || "") + ":" + (agent.tokens || 0);
+				})
+				.join(",");
+		}
+		return [
+			node.id,
+			node.label || "",
+			node.toolName || "",
+			node.mode || "",
+			node.status || "",
+			node.durationMs || 0,
+			node.summary || "",
+			node.text || "",
+			node.tokens ? (node.tokens.input || 0) + "/" + (node.tokens.output || 0) : "",
+			node.progress ? tree.progressKey(node) : "",
+			agentShape
+		].join("|");
+	}
+
+	function renderInspector(force) {
+		var node = selectedId ? nodeIndex.get(selectedId) : null;
+		var signature = node ? inspectorKey(node) : "";
+
+		if (!force && signature === inspectorSignature) return;
+		inspectorSignature = signature;
+
 		els.inspector.textContent = "";
 
-		var node = selectedId ? nodeIndex.get(selectedId) : null;
 		if (!node) {
 			els.inspector.appendChild(
 				el("p", "inspector-hint", "选择左侧任一节点查看参数、子代理明细与耗时。")
@@ -610,11 +720,12 @@
 	});
 
 	// Running nodes need a live elapsed counter; touching only the time label
-	// keeps hover state and scroll position intact.
+	// keeps hover state and scroll position intact. Skipped entirely when the
+	// last computed stats show nothing is running.
 	global.setInterval(function () {
-		var running = els.tree.querySelectorAll('.node-card[data-status="running"][data-node-id]');
-		if (!running.length) return;
+		if (!lastStats.running) return;
 
+		var running = els.tree.querySelectorAll('.node-card[data-status="running"][data-node-id]');
 		Array.prototype.forEach.call(running, function (card) {
 			var node = nodeIndex.get(card.dataset.nodeId);
 			if (!node || !node.startedAt) return;

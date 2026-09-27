@@ -25,6 +25,13 @@
 	var enabled = true;
 	var pinned = true;
 
+	/**
+	 * Locally echoed sends awaiting the host's replay of the same turn. The
+	 * first-in pending resolves first because user messages are echoed in
+	 * order; text matching is only a fast path (the host may expand templates).
+	 */
+	var pendings = [];
+
 	function el(tag, className, text) {
 		var node = document.createElement(tag);
 		if (className) node.className = className;
@@ -85,6 +92,7 @@
 		list.textContent = "";
 		bubbles.clear();
 		order.length = 0;
+		pendings.length = 0;
 
 		(messages || []).forEach(function (message) {
 			if (!message || !message.id) return;
@@ -104,6 +112,12 @@
 		if (!message || !message.id) return;
 
 		var wasPinned = pinned || atBottom();
+
+		// A user turn arriving from the host resolves the local echo of the
+		// same send. Match by text first, fall back to FIFO — the host may
+		// have expanded templates, but the order still holds.
+		if (message.role === "user") resolvePending(message.text);
+
 		var bubble = bubbles.get(message.id);
 
 		if (bubble) {
@@ -125,9 +139,68 @@
 		list.textContent = "";
 		bubbles.clear();
 		order.length = 0;
+		pendings.length = 0;
 		refreshEmpty();
 		pinned = true;
 		scrollToBottom(false);
+	}
+
+	// ------------------------------------------------------------ local echo
+
+	function dropPendingBubble(entry) {
+		var bubble = bubbles.get(entry.id);
+		if (bubble) bubble.remove();
+		bubbles.delete(entry.id);
+		var at = order.indexOf(entry.id);
+		if (at !== -1) order.splice(at, 1);
+	}
+
+	/** Echo a sent message locally so it is visible before the host replays it. */
+	function beginPending(text) {
+		var bubble = el("div", "msg", text);
+		bubble.dataset.role = "user";
+		bubble.dataset.pending = "true";
+
+		var id = "pending-" + Date.now() + "-" + order.length;
+		bubbles.set(id, bubble);
+		order.push(id);
+		list.appendChild(bubble);
+		trim();
+		refreshEmpty();
+		scrollToBottom(false);
+
+		var entry = { id: id, text: text };
+		pendings.push(entry);
+		return entry;
+	}
+
+	/** Retire the local echo once the host's own copy is on screen. */
+	function resolvePending(text) {
+		if (!pendings.length) return;
+
+		var index = -1;
+		for (var i = 0; i < pendings.length; i += 1) {
+			if (pendings[i].text === text) {
+				index = i;
+				break;
+			}
+		}
+		var entry = index >= 0 ? pendings.splice(index, 1)[0] : pendings.shift();
+		dropPendingBubble(entry);
+		refreshEmpty();
+	}
+
+	/** A send failed: drop the echo, put the text back in the composer. */
+	function failPending(errorText) {
+		var entry = pendings.shift();
+		if (entry) {
+			dropPendingBubble(entry);
+			refreshEmpty();
+			input.value = entry.text;
+			autoGrow();
+		}
+		refreshSendState();
+		showError(errorText || "发送失败。");
 	}
 
 	/** Surface a local failure (a rejected send) as a distinct bubble. */
@@ -151,6 +224,9 @@
 
 	function setBusy(value) {
 		busy = Boolean(value);
+		// Busy no longer locks the composer: the extension queues busy-time
+		// sends as followUp, so the send stays available — just labelled.
+		sendButton.title = busy ? "生成中，发送的消息将排队送达" : "";
 		refreshSendState();
 	}
 
@@ -167,13 +243,13 @@
 	}
 
 	function refreshSendState() {
-		sendButton.disabled = input.value.trim().length === 0 || busy || !enabled;
+		sendButton.disabled = input.value.trim().length === 0 || !enabled;
 		input.disabled = !enabled;
 	}
 
 	function submit() {
 		var text = input.value.trim();
-		if (!text || busy || !enabled) return;
+		if (!text || !enabled) return;
 
 		var hook = global.OrchestraChat.onSend;
 		if (typeof hook !== "function") return;
@@ -224,6 +300,8 @@
 		upsert: upsert,
 		clear: clear,
 		showError: showError,
+		beginPending: beginPending,
+		failPending: failPending,
 		setBusy: setBusy,
 		setEnabled: setEnabled,
 		/** Assigned by app.js. */

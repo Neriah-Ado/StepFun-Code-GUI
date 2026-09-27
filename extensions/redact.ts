@@ -7,9 +7,21 @@
  * first, so the gateway and the browser never see raw secrets.
  */
 
-/** Keys whose values are replaced wholesale, matched case-insensitively. */
-const SENSITIVE_KEY =
-	/key|token|secret|password|passwd|credential|authorization|auth|cookie|bearer|apikey|api_key/i;
+/**
+ * Keys whose values are replaced wholesale. Matching is two-tier to avoid the
+ * substring false positives a bare `/key|auth/i` produces ("metaKey",
+ * "keyCode", "author"): high-signal tokens match anywhere inside the key once
+ * separators/casing are normalized, while weak tokens ("key", "auth") only
+ * match a standalone key name.
+ */
+const STRONG_TOKEN =
+	/token|secret|passw|credential|authorization|cookie|bearer|apikey|signature/i;
+const WEAK_EXACT = /^(key|auth|pwd|passwd)$/i;
+
+function isSensitiveKey(raw: string): boolean {
+	const normalized = raw.replace(/[^a-z0-9]+/gi, "");
+	return STRONG_TOKEN.test(normalized) || WEAK_EXACT.test(normalized);
+}
 
 /** Per-string ceiling, in characters. */
 const MAX_STRING = 2048;
@@ -59,7 +71,7 @@ function walk(value: unknown, depth: number): unknown {
 			out["…"] = "[more keys omitted]";
 			break;
 		}
-		out[key] = SENSITIVE_KEY.test(key) ? "***" : walk(source[key], depth + 1);
+		out[key] = isSensitiveKey(key) ? "***" : walk(source[key], depth + 1);
 		seen += 1;
 	}
 	return out;

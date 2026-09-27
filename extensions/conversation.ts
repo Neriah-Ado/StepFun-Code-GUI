@@ -17,6 +17,14 @@ const MAX_TEXT = 20000;
 const MAX_ENTRIES_SCANNED = 4000;
 
 /**
+ * Rough character ceiling for one serialized history line. The gateway reads
+ * JSONL frames with a hard per-line cap; 400 messages x 20k characters could
+ * reach ~8 MB and kill the reader, so the replay is trimmed from the oldest
+ * end to stay comfortably inside that budget.
+ */
+const MAX_HISTORY_CHARS = 1_500_000;
+
+/**
  * Coalescing window for streamed deltas. A delta carries only the increment,
  * but the browser re-renders the whole bubble, so forwarding one frame per token
  * is O(n²) in reply length. 80ms keeps the typing feel while cutting frames by
@@ -47,6 +55,14 @@ export function createConversation(options: ConversationOptions): Conversation {
 
 	const messages: ConversationMessage[] = [];
 	const index = new Map<string, ConversationMessage>();
+
+	/**
+	 * Host payloads occasionally carry no message id. recordMessage invents a
+	 * fallback for the user turn; the matching finalizeMessage must reuse the
+	 * SAME id or it would insert a duplicate bubble instead of finalizing the
+	 * existing one. FIFO because user messages finalize in arrival order.
+	 */
+	const userFallbackIds: string[] = [];
 
 	function publish(message: ConversationMessage): void {
 		emit({ kind: "conversation", ts: Date.now(), message });
@@ -104,12 +120,45 @@ export function createConversation(options: ConversationOptions): Conversation {
 
 		messages.length = 0;
 		index.clear();
+		userFallbackIds.length = 0;
 		for (const message of replayed.slice(-MAX_MESSAGES)) {
 			messages.push(message);
 			index.set(message.id, message);
 		}
 
-		emit({ kind: "conversation_history", ts: Date.now(), messages: messages.slice() });
+		const bounded = boundHistory(replayed.slice(-MAX_MESSAGES));
+		emit({ kind: "conversation_history", ts: Date.now(), messages: bounded });
+	}
+
+	/**
+	 * Trim the replay from the oldest end until its serialized size fits the
+	 * gateway's per-line budget. The newest message is always kept (clipped if
+	 * it alone would exceed the budget) so the panel never renders empty.
+	 */
+	function boundHistory(messages: ConversationMessage[]): ConversationMessage[] {
+		let total = 0;
+		let start = 0;
+		for (let position = messages.length - 1; position >= 0; position -= 1) {
+			total += messages[position].text.length + 64;
+			if (total > MAX_HISTORY_CHARS) {
+				start = position + 1;
+				break;
+			}
+		}
+
+		if (start === 0) return messages;
+		if (start >= messages.length) {
+			const newest = messages[messages.length - 1];
+			process.stderr.write(
+				"[step-orchestra] newest history message exceeds the replay budget; clipping it\n"
+			);
+			return [{ ...newest, text: clip(newest.text.slice(0, MAX_HISTORY_CHARS)) }];
+		}
+
+		process.stderr.write(
+			`[step-orchestra] history replay trimmed to the last ${messages.length - start} messages to fit the frame budget\n`
+		);
+		return messages.slice(start);
 	}
 
 	function roleOf(message: Record<string, any>): "user" | "assistant" | null {
@@ -125,9 +174,9 @@ export function createConversation(options: ConversationOptions): Conversation {
 		const role = roleOf(message);
 		if (!role) return;
 
-		const id =
-			firstString(message.id, record?.messageId) ||
-			(role === "assistant" ? STREAM_ID : `msg-${Date.now()}-${messages.length}`);
+		const explicitId = firstString(message.id, record?.messageId);
+		const id = explicitId || `msg-${Date.now()}-${messages.length}`;
+		if (!explicitId && role === "user") userFallbackIds.push(id);
 
 		upsert({
 			id,
@@ -200,9 +249,17 @@ export function createConversation(options: ConversationOptions): Conversation {
 		const role = roleOf(message);
 		if (!role) return;
 
-		const id =
-			firstString(message.id, record?.messageId) ||
-			(role === "assistant" ? STREAM_ID : `msg-${Date.now()}`);
+		let id = firstString(message.id, record?.messageId);
+		if (!id) {
+			if (role === "assistant") {
+				id = STREAM_ID;
+			} else {
+				// Reuse the id recordMessage invented for this turn; if trimming
+				// already dropped that message, start a fresh one.
+				const candidate = userFallbackIds.shift();
+				id = candidate && index.has(candidate) ? candidate : `msg-${Date.now()}-${messages.length}`;
+			}
+		}
 
 		const full = clip(textOf(message.content));
 		const existing = index.get(id);
