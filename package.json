@@ -1,0 +1,29 @@
+{
+	"name": "step-orchestra",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Liquid-glass orchestration panel for Step Code subagent and workflow runs",
+	"type": "module",
+	"engines": {
+		"node": ">=22"
+	},
+	"pi": {
+		"extensions": [
+			"extensions/index.ts"
+		]
+	},
+	"files": [
+		"extensions",
+		"web",
+		"bin",
+		"README.md"
+	],
+	"keywords": [
+		"stepcode",
+		"step-code",
+		"plugin",
+		"extension",
+		"orchestration",
+		"subagent"
+	]
+}
