@@ -368,7 +368,8 @@ export default function stepOrchestra(pi: StepExtensionAPI): void {
 			const reason = bridge.getFailureReason();
 			process.stderr.write(
 				`[step-orchestra] panel not ready${reason ? `: ${reason}` : ""}\n` +
-					"[step-orchestra] build it with: cd gateway && go build -o ../bin/step-orchestra-gateway .\n",
+					"[step-orchestra] 一键方案:双击仓库根目录的 start.bat(Windows)/ start.sh(macOS/Linux),或运行 npm start。\n" +
+					"[step-orchestra] One-click: run start.bat / start.sh or npm start from the repo root.\n"
 			);
 		},
 	});

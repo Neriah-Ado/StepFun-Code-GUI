@@ -1623,7 +1623,74 @@ body {
 	display: inline-flex;
 }
 
-/* --------------------------------------------------------------- view stack */
+/* ------------------------------------------------------------- perf toggle */
+
+/* Compact sibling of .mode-switch; owned by perf.js, which also drives the
+   html.perf-lite class these rules respond to. */
+.perf-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+	padding: 6px 12px;
+	border-radius: 999px;
+	border: 1px solid rgba(255, 255, 255, 0.72);
+	background: linear-gradient(140deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.44));
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.94),
+		0 8px 18px -12px rgba(22, 30, 62, 0.42);
+	color: var(--ink-1);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	transition:
+		transform 0.24s var(--ease-out),
+		box-shadow 0.24s var(--ease-out),
+		border-color 0.2s var(--ease-soft),
+		background 0.24s var(--ease-soft);
+}
+
+.perf-toggle .perf-icon {
+	display: inline-flex;
+}
+
+.perf-toggle svg {
+	fill: none;
+	stroke: var(--ink-3);
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	transition: stroke 0.2s var(--ease-soft);
+}
+
+.perf-toggle:hover {
+	transform: translate3d(0, -1px, 0);
+	border-color: rgba(95, 90, 232, 0.45);
+	background: linear-gradient(140deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.58));
+}
+
+.perf-toggle:active {
+	transform: translate3d(0, 0, 0) scale(0.968);
+	transition-duration: 0.09s;
+}
+
+.perf-toggle:focus-visible {
+	outline: 2px solid rgba(95, 90, 232, 0.55);
+	outline-offset: 2px;
+}
+
+/* Lite is ON: the switch lights up so the current mode reads at a glance. */
+.perf-toggle[data-state="lite"] {
+	border-color: rgba(224, 161, 60, 0.55);
+	background: linear-gradient(140deg, rgba(224, 161, 60, 0.18), rgba(224, 161, 60, 0.08));
+}
+
+.perf-toggle[data-state="lite"] svg {
+	stroke: #b9812e;
+}
+
+/* ------------------------------------------------------------- view stack */
 
 /* Both views share one grid cell and stay mounted, so a switch only changes
    opacity: no layout shift, no scroll reset, no re-render, no data reload. */
@@ -1909,6 +1976,76 @@ body {
 .root-branch::before,
 .root-branch > .node-card::before {
 	display: none;
+}
+
+/* ==========================================================================
+   Performance mode (html.perf-lite, driven by perf.js)
+   Cuts the three continuous GPU fronts — animated aurora, backdrop sampling,
+   pointer effects (glass.js returns early) — and the one-shot entrance work.
+   Visual hierarchy survives via opaque surfaces and static state accents.
+   ========================================================================== */
+
+/* The aurora freezes into a static gradient; its compositor layer is released. */
+html.perf-lite .blob {
+	animation: none !important;
+	will-change: auto;
+}
+
+/* Blur sampling is replaced by the same opaque gradients the @supports
+   fallback uses, so the panel stays readable without per-frame sampling. */
+html.perf-lite .glass,
+html.perf-lite .account-picker,
+html.perf-lite .mode-switch,
+html.perf-lite .perf-toggle {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+html.perf-lite .glass {
+	background: linear-gradient(142deg, rgba(252, 253, 255, 0.94), rgba(244, 247, 253, 0.9));
+}
+
+html.perf-lite .account-picker,
+html.perf-lite .mode-switch,
+html.perf-lite .perf-toggle {
+	background: linear-gradient(140deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.72));
+}
+
+html.perf-lite .msg[data-role="assistant"] {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+	background: rgba(255, 255, 255, 0.88);
+}
+
+/* Continuous state animations become static accents. */
+html.perf-lite .live-dot,
+html.perf-lite .run-pip,
+html.perf-lite .msg[data-streaming="true"]::after {
+	animation: none !important;
+}
+
+html.perf-lite .node-card[data-status="running"] .card-glow {
+	animation: none !important;
+	opacity: 0.4;
+}
+
+/* One-shot entrance animations are pointless motion under lite. */
+html.perf-lite .topbar,
+html.perf-lite .panel,
+html.perf-lite .node-card,
+html.perf-lite .account-popover,
+html.perf-lite .msg,
+html.perf-lite .empty-ring {
+	animation: none !important;
+}
+
+/* A hidden tab cannot show the aurora; park it instead of compositing into the void. */
+html.perf-paused .blob,
+html.perf-paused .live-dot,
+html.perf-paused .run-pip,
+html.perf-paused .card-glow,
+html.perf-paused .msg[data-streaming="true"]::after {
+	animation-play-state: paused !important;
 }
 
 @media (max-width: 1080px) {

@@ -41,6 +41,10 @@
 	}
 
 	function onPointerMove(event) {
+		// Performance mode skips every pointer-driven effect, including the
+		// getBoundingClientRect each move would otherwise pay for.
+		if (global.OrchestraPerf && global.OrchestraPerf.lite) return;
+
 		var target = event.target;
 		if (!target || typeof target.closest !== "function") return;
 
@@ -66,6 +70,8 @@
 	// Returning the card to rest is a variable reset, so the CSS transition
 	// animates it back instead of snapping.
 	function onPointerLeave(event) {
+		if (global.OrchestraPerf && global.OrchestraPerf.lite) return;
+
 		var target = event.target;
 		if (!target || typeof target.closest !== "function") return;
 

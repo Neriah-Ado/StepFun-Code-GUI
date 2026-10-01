@@ -7,9 +7,12 @@
  * - The gateway is launched lazily on the first `start()` call, then kept alive
  *   for the whole session so the browser panel survives reconnects.
  * - A crash is not fatal: the bridge re-spawns on the next message.
+ * - A missing binary triggers a one-shot background build with the Go
+ *   toolchain, so a fresh clone works from `/orchestra` without ever opening a
+ *   terminal. Set STEP_ORCHESTRA_AUTOBUILD=0 to opt out.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +31,13 @@ const BINARY_CANDIDATES: string[] = [
 	resolve(PACKAGE_ROOT, "gateway", BINARY_NAME),
 ].filter((candidate) => candidate.length > 0);
 
+const AUTOBUILD_OUTPUT = resolve(PACKAGE_ROOT, "bin", BINARY_NAME);
+const GATEWAY_DIR = resolve(PACKAGE_ROOT, "gateway");
+
+const AUTOBUILD_DISABLED = /^(0|false|off)$/i.test(process.env.STEP_ORCHESTRA_AUTOBUILD ?? "");
+/** Rebuild attempts are rate-limited so a broken toolchain cannot spawn `go` in a loop. */
+const AUTOBUILD_COOLDOWN_MS = 30_000;
+
 /** The gateway prints exactly one such line on startup. */
 const PANEL_URL_PATTERN = /https?:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/;
 
@@ -44,6 +54,10 @@ export class Bridge {
 	private warned = false;
 	private disposed = false;
 	private everStarted = false;
+	/** One background `go build` at a time, rate-limited by AUTOBUILD_COOLDOWN_MS. */
+	private building = false;
+	private buildChild: ChildProcess | null = null;
+	private lastBuildAttemptAt = 0;
 
 	/** Launch the gateway if it is not already running. Safe to call repeatedly. */
 	start(): void {
@@ -51,7 +65,11 @@ export class Bridge {
 
 		const binary = BINARY_CANDIDATES.find((candidate) => existsSync(candidate));
 		if (!binary) {
-			this.failureReason = `gateway binary missing (looked in ${BINARY_CANDIDATES.join(", ")})`;
+			if (AUTOBUILD_DISABLED) {
+				this.failureReason = `gateway binary missing (looked in ${BINARY_CANDIDATES.join(", ")})`;
+			} else {
+				this.autoBuild();
+			}
 			return;
 		}
 
@@ -124,6 +142,13 @@ export class Bridge {
 
 		const line = JSON.stringify(message);
 
+		// While the one-shot build runs there is no gateway to start; holding the
+		// frames keeps the panel's first paint complete once the build lands.
+		if (this.building) {
+			this.pending.push(line);
+			return;
+		}
+
 		if (!this.child) {
 			this.start();
 			if (!this.child) {
@@ -170,6 +195,14 @@ export class Bridge {
 		this.disposed = true;
 		const child = this.child;
 		this.child = null;
+		if (this.buildChild) {
+			try {
+				this.buildChild.kill();
+			} catch {
+				// build process already gone
+			}
+			this.buildChild = null;
+		}
 		if (!child) return;
 		try {
 			child.stdin?.write(`${JSON.stringify({ kind: "shutdown", ts: Date.now() })}\n`);
@@ -185,6 +218,81 @@ export class Bridge {
 			}
 		}, 1500);
 		timer.unref?.();
+	}
+
+	/**
+	 * Build the gateway with the local Go toolchain, then start it.
+	 *
+	 * This is the zero-CLI install path: a fresh clone plus `step install` is
+	 * enough, because the first `/orchestra` (or first forwarded event) finds no
+	 * binary and produces one. The build runs in the background — the host's
+	 * agent loop is never awaited on; incoming frames queue and flush when the
+	 * gateway comes up. Failures collapse into the usual one-shot warning.
+	 */
+	private autoBuild(): void {
+		if (this.building || this.disposed) return;
+		const now = Date.now();
+		if (now - this.lastBuildAttemptAt < AUTOBUILD_COOLDOWN_MS) return;
+		this.lastBuildAttemptAt = now;
+
+		let child: ChildProcess;
+		try {
+			mkdirSync(resolve(PACKAGE_ROOT, "bin"), { recursive: true });
+			child = spawn(
+				"go",
+				["build", "-trimpath", "-ldflags", "-s -w", "-o", AUTOBUILD_OUTPUT, "."],
+				{
+					cwd: GATEWAY_DIR,
+					stdio: ["ignore", "ignore", "pipe"],
+					windowsHide: true,
+				}
+			);
+		} catch (error) {
+			this.failureReason = `gateway auto-build could not start: ${String(error)}`;
+			this.warnOnce();
+			return;
+		}
+
+		this.building = true;
+		this.buildChild = child;
+		this.failureReason = "gateway binary missing — auto-build in progress (first run: ~10–30s)";
+		process.stderr.write(
+			"[step-orchestra] gateway binary missing — building it with Go in the background (first run takes ~10–30s)…\n" +
+				`[step-orchestra] 首次运行将自动构建网关,预计 10–30 秒;完成后再次运行 /orchestra 即可。\n`
+		);
+
+		// A missing toolchain surfaces as an async ENOENT here, not a throw.
+		child.on("error", (error) => {
+			this.building = false;
+			this.buildChild = null;
+			this.failureReason =
+				`Go 工具链不可用(${error.message})。请安装 Go(https://go.dev/dl)后重试,` +
+				`或双击仓库根目录的 start.bat / 运行 npm start 一次。` +
+				`Go toolchain unavailable — install it from https://go.dev/dl, or run start.bat / npm start once.`;
+			this.warnOnce();
+		});
+
+		let stderrTail = "";
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderrTail = (stderrTail + chunk).slice(-1024);
+		});
+
+		child.on("exit", (code) => {
+			this.building = false;
+			this.buildChild = null;
+			if (this.disposed) return;
+			if (code === 0) {
+				process.stderr.write("[step-orchestra] gateway built — starting it now.\n");
+				this.start();
+				return;
+			}
+			this.failureReason =
+				`网关自动构建失败(退出码 ${code})。` +
+				`可在仓库根目录运行 npm run build 查看完整输出。Go build failed (exit ${code}).`;
+			this.warnOnce();
+			process.stderr.write(`${stderrTail}\n`);
+		});
 	}
 
 	/**
@@ -230,7 +338,9 @@ export class Bridge {
 		const reason = this.failureReason ?? "unknown reason";
 		process.stderr.write(
 			`[step-orchestra] live panel unavailable: ${reason}\n` +
-				`[step-orchestra] build it with: cd gateway && go build -o ../bin/${BINARY_NAME} .\n`,
+				`[step-orchestra] 一键方案:双击仓库根目录的 start.bat(Windows)或 start.sh(macOS/Linux),` +
+				`或在仓库根目录运行 npm start。\n` +
+				`[step-orchestra] One-click: run start.bat (Windows) / start.sh (macOS/Linux) or npm start from the repo root.\n`
 		);
 	}
 }

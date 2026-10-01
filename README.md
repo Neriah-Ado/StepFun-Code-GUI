@@ -1,6 +1,6 @@
 # StepFun Code-GUI
 
-**v1.5.0** · [简体中文](README.md) | [English](README.en.md)
+**v2.0.0** · [简体中文](README.md) | [English](README.en.md)
 
 Step Code 的子代理编排可视化面板。终端中运行的 `subagent` / `workflow` 编排，
 以液态玻璃界面在浏览器中实时呈现。
@@ -30,20 +30,34 @@ Step Code 的 UI 层为 `pi-tui`，采用终端字符差分渲染，插件不具
 
 ## 快速开始
 
+**方式一（推荐，零命令行）：**
+
+| 平台 | 操作 |
+|---|---|
+| Windows | 双击 `start.bat` |
+| macOS | 双击 `start.command`（即 `start.sh`），或在终端运行 `./start.sh` |
+| 任意平台（已装 Node ≥ 22） | 在仓库根目录运行 `npm start` |
+
+启动器会自动完成剩余一切：定位（或用 Go 构建）网关二进制、启动网关、
+自动打开浏览器。首次运行需 10–30 秒构建，之后即点即开。
+
+**方式二（体验模式，无需安装 Step Code）：**
+
 ```bash
-# 1. 构建 Go 网关（产物约 10 MB，自包含，无运行时依赖）
-cd gateway
-go build -o ../bin/step-orchestra-gateway .      # Windows 平台需附加 .exe
-
-# 2. 本地端到端验证（无需安装 Step Code）
-node tools/mock-feed.mjs
-
-# 3. 如需手动查看面板
-node tools/mock-feed.mjs --serve
+npm run demo        # 等价于 node start.mjs --demo
 ```
 
-`mock-feed.mjs` 回放一组完整场景（一次 workflow 并行扇出与一次 subagent 串行链），
-随后自动请求 `/api/snapshot` 执行断言并输出结果。
+回放一组完整场景（workflow 并行扇出 + subagent 串行链 + 对话流 + 用量指标），
+用于快速查看面板效果；回放完成后断言 33/33 输出，网关保持运行供浏览。
+
+**方式三（开发者，手动构建）：**
+
+```bash
+npm run build       # 等价于 go build（自动处理 Windows .exe 后缀）
+```
+
+> 网关为标准库 Go 程序（产物约 7 MB，`-trimpath -ldflags "-s -w"` 裁剪），
+> 构建仅需 Go 工具链，无任何第三方依赖；其余一切仅需 Node ≥ 22。
 
 ---
 
@@ -57,10 +71,16 @@ step list
 安装完成后，在 Step Code 中执行 `/orchestra`，将输出面板地址：
 
 ```
-[step-orchestra] panel http://127.0.0.1:47810/?t=<token>
+[step-orchestra] panel: http://127.0.0.1:47810/?t=<token>
 ```
 
 网关随扩展加载自动启动，并在会话结束时退出，无需额外配置。
+
+**无需手动构建。** 若扩展启动时发现网关二进制缺失，会自动在后台调用
+Go 构建（仅首次，约 10–30 秒，完成后日志提示再次运行 `/orchestra`）；
+期间事件在内存中排队，构建完成后一次性回放，面板首屏不缺数据。
+安装前先运行一次 `start.bat` / `npm start` 的用户则完全不会遇到该等待。
+设置环境变量 `STEP_ORCHESTRA_AUTOBUILD=0` 可关闭该行为。
 
 ### 包结构
 
@@ -279,6 +299,22 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 
 ---
 
+## 性能模式（V2.0 新增）
+
+液态玻璃的三个持续 GPU 开销来源——极光背景动画、`backdrop-filter` 采样、
+指针视差/高光——在低配设备与后台标签页上纯属浪费。V2.0 为此引入一键降载：
+
+| 项 | 设计 |
+|---|---|
+| 开关 | topbar「性能」按钮；开启后显示「省电」并转为琥珀色描边 |
+| 降载内容 | 极光动画冻结为静态渐变；全部 `backdrop-filter` 关闭（换用不透明渐变，可读性不变）；入场/呼吸/脉冲等持续与一次性动画关闭；`glass.js` 跳过全部指针追踪（含每次 move 的 `getBoundingClientRect`） |
+| 自动启用 | 首次访问且无本地选择时：`prefers-reduced-motion`、≤ 4 逻辑核或 ≤ 4 GB 内存的设备默认开启省电模式 |
+| 持久化 | 用户手动切换后写入 `localStorage`（key `step-orchestra:perf-lite`）；自动默认值不落盘，换设备不误伤 |
+| 后台休眠 | 标签页隐藏时自动暂停极光等持续动画（`html.perf-paused`），回到前台恢复 |
+| 降级不降级面 | 状态色（运行/完成/失败 rail、呼吸改为静态描边）全部保留，层级与可读性不受影响 |
+
+---
+
 ## 液态玻璃实现
 
 | 层次 | 手段 |
@@ -288,7 +324,7 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 | 镜面高光 | `radial-gradient` 跟随 `--gx` / `--gy`，由 `glass.js` 写入 |
 | 立体感 | 卡片跟随 `--rx` / `--ry` 产生不超过 4.5° 的视差倾斜 |
 | 液态形变 | 空状态光环应用 SVG `feTurbulence` 与 `feDisplacementMap` |
-| 性能护栏 | rAF 合并指针事件；节点入场动画采用 `backwards` 而非 `both`（后者会锁定 `transform` 导致悬停失效）；`contain: layout paint` |
+| 性能护栏 | rAF 合并指针事件；节点入场动画采用 `backwards` 而非 `both`（后者会锁定 `transform` 导致悬停失效）；`contain: layout paint`；topbar「性能」开关一键降载（见上一节） |
 | GPU 护栏 | `backdrop-filter` 只保留在 topbar 与两块面板等大面上，节点卡片不用（逐卡背景采样是规模下的主要开销）；运行节点的「呼吸」动画只驱动专用覆盖层的 `opacity`，不逐帧重绘 `box-shadow`；卡片无常驻 `will-change` |
 | 降级 | `@supports not (backdrop-filter)` 时降为高不透明纯色面板；`prefers-reduced-motion` 下关闭全部动效 |
 
@@ -301,9 +337,12 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 
 ```
 step-orchestra/
+├── start.mjs            # 一键启动器：定位/构建网关、启动、自动开浏览器
+├── start.bat            #   Windows 双击入口
+├── start.sh             #   macOS / Linux 入口（start.command 同内容）
 ├── extensions/          # Step Code 扩展（TypeScript，ESM，Node ≥ 22）
 │   ├── index.ts         #   入口：事件订阅与转发
-│   ├── bridge.ts        #   Go 子进程生命周期 + 反向通道解析
+│   ├── bridge.ts        #   Go 子进程生命周期 + 反向通道解析 + 缺失时自动构建
 │   ├── conversation.ts  #   对话镜像：历史回放 / 流式累积 / 发送
 │   ├── metrics.ts       #   回合计时与吞吐计算
 │   ├── profiles.ts      #   凭据应用：registerProvider 热切换
@@ -313,12 +352,14 @@ step-orchestra/
 ├── gateway/             # Go 网关（标准库，零第三方依赖）
 │   ├── main.go          #   stdin 读取 + HTTP/SSE + REST 端点
 │   ├── state.go         #   拓扑状态机
+│   ├── state_test.go    #   状态机单元测试（V2.0 新增）
 │   ├── conversation.go  #   对话日志（有界、按 id 索引）
 │   ├── profiles.go      #   凭据存储（原子写、掩码投影）
 │   └── hub.go           #   SSE 广播
 ├── web/                 # 浏览器面板（零构建，原生 HTML/CSS/JS）
-│   ├── liquid-glass.css #   设计系统 + 视图栈 + 切换按钮 + 配置面板
-│   ├── glass.js         #   指针高光 / 视差倾斜
+│   ├── perf.js          #   性能模式：自动检测 / 持久化 / 后台休眠（V2.0 新增）
+│   ├── liquid-glass.css #   设计系统 + 视图栈 + 切换按钮 + 配置面板 + perf-lite
+│   ├── glass.js         #   指针高光 / 视差倾斜（性能模式下跳过）
 │   ├── tree.js          #   编排树渲染（增量复用）
 │   ├── chat.js          #   对话视图（气泡复用 + 贴底滚动）
 │   ├── profiles.js      #   API 配置选择器
@@ -327,15 +368,21 @@ step-orchestra/
 │   └── architecture.svg #   架构图
 └── tools/
     ├── mock-feed.mjs    # 端到端验证（编排 + 对话 + 反向通道 + 凭据 + 用量）
-    ├── test-progress.mjs# 宿主载荷解析回归
+    ├── test-progress.mjs#   宿主载荷解析回归
+    ├── test-launcher.mjs#   启动器单元回归（V2.0 新增）
+    ├── test-extension-import.mjs # 扩展模块图冒烟（V2.0 新增）
+    ├── run-all-tests.mjs#   聚合入口，支持 --rounds 多轮（V2.0 新增）
     └── check-layers.mjs # 层叠关系静态校验
 ```
 
-前端调试流程：执行 `node tools/mock-feed.mjs --serve`，修改文件后刷新浏览器即可生效，无需构建。
+前端调试流程：执行 `npm run demo`（或 `node tools/mock-feed.mjs --serve`），
+修改文件后刷新浏览器即可生效，无需构建。
 
 ---
 
 ## 验证状态
+
+聚合入口：`npm test`（或 `node tools/run-all-tests.mjs --rounds 3` 做多轮浸泡）。
 
 | 项 | 状态 |
 |---|---|
@@ -345,10 +392,14 @@ step-orchestra/
 | 端口冲突自动避让 | 已实测（47810 被占用时顺延至 47811） |
 | 网关与前端数据链路（编排 / 对话 / 反向通道 / 凭据 / 用量） | `tools/mock-feed.mjs` **33/33** 断言 |
 | 宿主载荷解析 | `tools/test-progress.mjs` 11/11 断言 |
+| 网关状态机（生命周期 / 逐出 / 占位 / 序号 / 统计） | `gateway/state_test.go` 6 组 `go test`（V2.0 新增） |
+| 启动器决策逻辑（平台命名 / 参数 / 候选解析） | `tools/test-launcher.mjs` 6/6 断言（V2.0 新增） |
+| 扩展模块图加载与导出面 | `tools/test-extension-import.mjs`（V2.0 新增） |
 | 凭据持久化落盘 | 已实测，`profiles.json` 写入且包含密钥 |
 | 明文密钥不外泄至浏览器 | 已实测，响应体不含明文 |
 | 配置浮层层叠关系 | `tools/check-layers.mjs` 11/11（已验证该脚本可捕获原缺陷） |
 | 反向通道鉴权（无 token 拒绝） | 已实测返回 401 |
+| 性能模式（开关 / 持久化 / 后台休眠） | V2.0 新增，浏览器手工 + 脚本验证 |
 | 真实 agent 事件流（tool_call / 消息流） | **未验证** —— 需登录后运行真实任务方可触发 |
 | `registerProvider` 热切换实际生效 | **未验证** —— 需登录后观察下一个请求 |
 
@@ -378,7 +429,8 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 - **子代理明细为聚合数据。** 子代理运行于独立进程，主进程无法观测其内部工具调用，
   面板仅能呈现宿主在进度快照中给出的 agent 行。
 - **扇出仅一层。** 此为 Step Code 的约束，因此树最深两层。
-- **Windows 构建需附加 `.exe`。** `bridge.ts` 已按平台自动选择文件名。
+- **首次构建需 Go 工具链。** 二进制不随仓库分发（`bin/` 不入库）；
+  扩展侧与启动器均会自动构建，但机器上仍需安装 Go（https://go.dev/dl）。
 - **端口固定于 47810–47821。** 全部占用时启动失败，并在 `/orchestra` 中给出原因。
 
 ---
@@ -387,12 +439,14 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 
 | 现象 | 处理 |
 |---|---|
-| `/orchestra` 提示 binary missing | 网关未构建，执行 `cd gateway && go build -o ../bin/step-orchestra-gateway .` |
+| `/orchestra` 提示 binary missing / Go 不可用 | 双击 `start.bat`（或 `npm start`）一次；或安装 Go 后运行 `/orchestra` 触发自动构建 |
+| 双击 start.bat 闪退 | 未安装 Node.js ≥ 22，从 https://nodejs.org 安装后重试 |
 | 面板持续显示「连接中」 | 检查 URL 中 `t` 参数是否完整；token 每次运行均会变化 |
 | 面板显示「会话已失效」 | 网关进程已重启并更换了 token，重新运行 `/orchestra` 打印新地址后打开 |
 | 节点未出现 | 确认触发的是 `subagent` / `workflow`；普通工具调用需关闭「仅编排」筛选 |
-| 端口被占用 | 通过 `STEP_ORCHESTRA_PORT=50000` 环境变量覆盖起始端口 |
+| 端口被占用 | 通过 `STEP_ORCHESTRA_PORT=50000` 环境变量覆盖起始端口，或 `npm start -- --port 50000` |
 | 自定义网关路径 | 通过 `STEP_ORCHESTRA_BIN=/path/to/gateway` 环境变量覆盖 |
+| 想关闭自动构建 | 设置 `STEP_ORCHESTRA_AUTOBUILD=0` |
 
 ---
 

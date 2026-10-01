@@ -76,6 +76,15 @@
 		</span>
 	</button>
 
+	<button class="perf-toggle" id="perf-toggle" type="button" aria-pressed="false" data-state="full">
+		<span class="perf-icon" aria-hidden="true">
+			<svg viewBox="0 0 24 24" width="13" height="13">
+				<path d="M13 3 5.5 13.5h5L11 21l7.5-10.5h-5z" fill="none"></path>
+			</svg>
+		</span>
+		<span id="perf-toggle-label">性能</span>
+	</button>
+
 	<button class="mode-switch" id="mode-switch" type="button" data-target="chat" aria-label="切换到对话模式">
 		<span class="mode-icon mode-icon-chat" aria-hidden="true">
 			<svg viewBox="0 0 24 24" width="15" height="15">
@@ -223,6 +232,7 @@
 	</aside>
 </main>
 
+<script src="perf.js"></script>
 <script src="glass.js"></script>
 <script src="tree.js"></script>
 <script src="chat.js"></script>
