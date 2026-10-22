@@ -103,7 +103,11 @@ func (s *profileStore) Find(id string) (storedProfile, bool) {
 }
 
 // persistLocked writes atomically. mode 0600 because the file holds plaintext
-// credentials; on Windows the mode is best-effort and ACLs govern.
+// credentials. On Windows the permission bits are not enforced at all — 0600
+// only maps to the read-only attribute, and the directory mode below (0700) is
+// likewise ignored — so confidentiality depends on the inherited ACL of the
+// user's .stepcode directory. Treat these modes as defence in depth, not as a
+// guarantee. See "Windows permissions" in README.md.
 func (s *profileStore) persistLocked() error {
 	if s.dir == "" {
 		return errors.New("profile directory unavailable")
