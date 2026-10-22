@@ -1,32 +1,28 @@
 # StepFun Code-GUI
 
-**v2.0.0** · [简体中文](README.md) | [English](README.en.md)
+**v2.0.0** · **English** · [简体中文](README.md)
+
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A5%2022-339933.svg)](package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#quick-start)
 
 An orchestration visualisation panel for Step Code. `subagent` and `workflow` runs
 executing in the terminal are rendered live in the browser as a liquid-glass interface.
 
 > The internal package name is `step-orchestra`; the repository and product name is StepFun Code-GUI.
 
-![Architecture](docs/architecture.svg)
-
 ---
 
-## Architectural rationale
+## Features
 
-Step Code's UI layer is `pi-tui`, which renders terminal characters differentially.
-Extensions have no public API for injecting custom graphical components, and a terminal
-cannot express real blur or refraction. Given that constraint, the system is divided
-across four processes by responsibility:
-
-| Layer | Responsibility |
-|---|---|
-| TypeScript extension | Normalises host events into JSONL and writes them to a child process's stdin; contains no business logic |
-| Go gateway | Reconstructs topology and maintains state, pushed over SSE |
-| Browser panel | Carries all graphical rendering and animation |
-| Reverse channel | Returns commands via the gateway's stdout, used to send messages and apply credentials |
-
-The principal benefit of this split is change isolation: host API adjustments affect only
-the `extensions/` directory, and the panel can be developed and debugged independently of Step Code.
+- **Live orchestration topology** — Host events rebuild the `tool_call` / `tool_update` / `tool_result` topology, with node states covering pending / running / done / failed / cancelled.
+- **Fan-out mode inference** — Argument shape distinguishes single / parallel / chain (`agent` / `tasks` / `chain`) without an explicit `mode` field; the mode badge and task summary appear directly on the card.
+- **Subagent detail and aggregate metrics** — The inspector shows subagent rows, progress, and redacted arguments; the topbar totals running / done / failed / orchestration counts and token spend.
+- **Conversation view and seamless switching** — History replay, 80 ms frame-coalesced streaming bubbles, and bottom-pinned scrolling; orchestration ↔ conversation switching never unmounts the DOM, so scroll position, selection, and drafts survive.
+- **Multi-account API profile hot-swap** — Credentials stay in the gateway and the browser sees only a `keyHint` mask; `registerProvider` takes effect without a restart, and 401 / 403 responses mark the active profile red with a reason.
+- **Single-line token usage metric** — `tok/s`, time to first token, output / generation time, average, cumulative usage, and context occupancy; at ≥75% / ≥92% the whole line changes colour and adds a warning.
+- **Liquid-glass visuals** — A `backdrop-filter` refraction base, 142° glass body, pointer-following highlight, ≤4.5° parallax tilt, and SVG displacement filters, with a `prefers-reduced-motion` fallback.
+- **Zero-command startup and performance mode** — Double-click `start.bat` / `start.command` to build and launch the gateway; `npm run demo` previews the panel without Step Code; performance mode cuts GPU load in one click and engages automatically on low-end devices and background tabs.
 
 ---
 
@@ -66,7 +62,9 @@ npm run build       # equivalent to go build, handling the Windows .exe suffix a
 
 ---
 
-## Installing into Step Code
+## Installation
+
+Install the extension into Step Code:
 
 ```bash
 step install /absolute/path/to/step-orchestra
@@ -75,7 +73,7 @@ step list
 
 Once installed, run `/orchestra` inside Step Code to print the panel address:
 
-```
+```text
 [step-orchestra] panel: http://127.0.0.1:47810/#t=<token>
 ```
 
@@ -83,7 +81,8 @@ The token sits in the URL **fragment** (`#t=`), so it is never sent to the serve
 leaks through `Referer`. On load, `web/token.js` rewrites the address bar back to
 `http://127.0.0.1:47810/` with `history.replaceState` and keeps the token for the tab in
 `sessionStorage`, so a refresh still works and a copied URL carries no secret.
-**`?t=` addresses from v2.0.0 and earlier no longer work** — rerun `/orchestra` for the new URL.
+**Query-string addresses used by v2.0.0 and earlier no longer work** — rerun `/orchestra`
+for the new URL.
 
 The gateway starts automatically when the extension loads and exits when the session ends;
 no further configuration is required.
@@ -114,122 +113,36 @@ Installation can also be bypassed with `step -e <entry path>` for temporary load
 
 ---
 
-## Event contract
+## Usage and commands
 
-The extension subscribes to the following host events (`pi.on(event, handler)`);
-field definitions defer to `extensions/types.ts`.
-
-| Host event | Purpose |
+| Command | Purpose |
 |---|---|
-| `session_start` | Session metadata (ID / cwd / model) |
-| `agent_start` / `agent_end` / `agent_settled` | Turn and overall settlement |
-| `tool_call` | Node creation; `subagent` / `workflow` are flagged as orchestration nodes and their mode extracted |
-| `tool_execution_update` | **Primary source of orchestration progress.** The payload sits under `event.partialResult` on 0.1.1 and `event.details` on 0.84.x; both are parsed |
-| `tool_result` | Terminal node state, duration, token usage |
-| `message_start` / `message_update` / `message_end` | Conversation stream: `assistantMessageEvent.text_delta` accumulates into a streaming bubble |
-| `session_shutdown` | Shut the gateway down |
+| `npm start` | One-click startup: locate or build the gateway, launch it, and open the panel in your default browser |
+| `npm run demo` | Replay the built-in scenario without installing Step Code |
+| `npm run build` | Build the gateway binary only |
+| `npm test` | Run the aggregate test suite (go vet / go test / module graph / payload parsing / stacking / launcher / end-to-end) |
+| `step install <path>` | Install the extension into Step Code |
+| `step -e <entry path>` | Load the extension temporarily, bypassing installation |
+| `/orchestra` | Print the panel address from Step Code and start the gateway |
 
-`message_update` fires once per token; only `assistantMessageEvent.type === "text_delta"`
-increments are consumed. Thinking and tool-call deltas are not forwarded, as they already
-surface as tool nodes.
+Minimal example:
 
-### Upstream resilience
-
-`extensions/progress.ts` maintains an **alias table** for each counter field
-(for example `running` covers `running` / `runningCount` / `active` / `activeCount`) and
-descends up to three levels through wrappers such as `partialResult`, `progress`,
-`workflowProgress`, `snapshot`, and `details`. A renamed host field degrades to a
-**partial read** rather than a blank panel.
-
-Observed differences between upstream versions:
-
-| Item | 0.1.1 | 0.84.x |
-|---|---|---|
-| Progress payload field | `event.partialResult` | `event.details` |
-| `subagent` tool | Provided by an example extension; arguments are `{agent\|tasks\|chain}` | Built in, with an additional `workflow` tool |
-| Install config location | `~/.stepcode/config.toml` | Documented as `settings.json` |
-| Package entry declaration | `"pi": { "extensions": [...] }` | — |
-
-`inferMode()` therefore derives the fan-out mode from **argument shape**: a `chain` array
-means chain, a `tasks` array means parallel, and `agent` or `task` means single.
-It does not depend on an explicit `mode` field.
-
----
-
-## Security design
-
-| Item | Measure |
-|---|---|
-| Network exposure | Bound to `127.0.0.1` only; port conflicts resolve by incrementing (up to 12 attempts). The `Host` header must also name `127.0.0.1` / `localhost`, defeating DNS rebinding |
-| Authentication | A 24-byte random token per run; every data endpoint validates it using constant-time comparison |
-| Token transport | The token lives only in the URL fragment (`#t=`), which is stripped from the address bar and history as soon as it is read. Read-only GETs may also use the query string; `POST` / `DELETE` accept **only** the `X-Orchestra-Token` header, so a token leaked from a URL cannot authorize a mutation |
-| Cross-site write protection | `POST` / `DELETE` validate `Origin`: absent means a local CLI (the token header still applies), present must equal the request `Host` exactly — anything else is 403 |
-| Static assets | Untokened (so the first paint costs one request) but restricted to the repository's `web/`: a `STEP_ORCHESTRA_WEB` pointing elsewhere is ignored with a log line, so an arbitrary directory is never exposed over loopback |
-| Credential leakage | Arguments pass through `redact.ts`: values under `key` / `token` / `secret` / `password` / `authorization` / `cookie` are replaced wholesale with `***` |
-| Payload growth | Strings truncate at 2048 characters, at most 24 keys per level, recursion depth capped at 4 |
-| Injection | The front end writes host data exclusively through `textContent`; `innerHTML` is used only for static icon paths declared in-file |
-| Data at rest | The gateway writes no browsing data; the token lives only in the extension process memory and the browser tab's `sessionStorage` |
-| First auto-build | When the binary is missing, the extension/launcher runs the local Go build on **repository source**: no network, no shell, no argument concatenation. It is equivalent to "installing means executing this repository" — an install trust model (see Known limitations) |
-
----
-
-## Conversation mode and view switching
-
-The panel hosts two views: **Orchestration** (tool and subagent topology) and
-**Conversation** (interaction with the agent). Both remain mounted within the same grid
-cell; switching only toggles visibility.
-
-### The switch control
-
-| Item | Design |
-|---|---|
-| Position | Right end of the topbar, immediately left of the connection indicator; a global view control, not owned by either panel column |
-| Label | Shows the **target mode**: "Conversation" while in the orchestration view, "Orchestration" while in the conversation view |
-| Icon | Follows the label — a speech bubble when the target is conversation, a node graph when it is orchestration; switched in CSS via `data-target`, without replacing DOM |
-| Hover | Lifts 1 px, border turns accent purple, glass highlight strengthens (240 ms) |
-| Press | `scale(0.972)`, transition compressed to 90 ms |
-| Focus | `:focus-visible` 2 px purple ring; keyboard reachable |
-| Mid-transition | `aria-busy="true"` with `pointer-events: none`, suppressing repeated activation within the 240 ms window |
-| Disabled | Switching is blocked while the event stream is down (`opacity: .45`, `cursor: not-allowed`, no hover feedback) |
-
-### Why switching does not stutter, flicker, or shift
-
-| Risk | Handling |
-|---|---|
-| Layout shift | Both views overlap in the same `grid-area: stage` cell, so container size is constant |
-| Rebuild flicker | Views are **never unmounted**; switching only changes `opacity` and `visibility` |
-| Lost scroll | The DOM survives, so scroll positions in both the tree and the conversation are preserved |
-| Lost selection | The selected node is a DOM attribute and is unaffected by switching |
-| Lost draft | The input's DOM survives; both content and caret position persist |
-| Data reload | Switching issues **no requests**; SSE keeps writing to both views |
-| Animation races | The 240 ms `aria-busy` window suppresses repeat activation; `prefers-reduced-motion` reduces transitions to 0.01 ms |
-
-### Conversation data flow
-
-```
-input box ──POST /api/send──▶ gateway ──one JSON line on stdout──▶ extension ──pi.sendUserMessage()──▶ host
-host ──message_start/update/end──▶ extension (accumulates text_delta) ──▶ gateway ──SSE──▶ bubble updates in place
+```bash
+npm start
 ```
 
-This reverse channel is the only downstream path in the system: stdin carries upstream
-events, stdout carries downstream commands.
-
-The send button's disabled state is a compound condition: empty input, a busy agent
-(`ctx.isIdle()` false), or a downed event stream. Sending while the agent is busy does not
-fail — the extension downgrades automatically to `deliverAs: "followUp"` and queues the message.
-
-Message bubbles reuse DOM keyed by id, and streaming updates touch only the text node
-rather than rebuilding the list. Scrolling uses a bottom-pinning strategy (auto-follow
-within 72 px of the bottom, otherwise a "Back to bottom" button appears) so that scrolling
-back through history is not interrupted.
+The browser opens the panel automatically. With the extension installed, run `/orchestra`
+inside Step Code to print a tokenised panel address (the token changes on every run).
 
 ---
 
-## API profile switching
+## Configuration
+
+### API profile switching
 
 Switch between multiple accounts' coding plans without restarting.
 
-### Configuration storage
+#### Configuration storage
 
 | Item | Decision |
 |---|---|
@@ -258,14 +171,14 @@ Plaintext is held by the gateway rather than in browser localStorage because loc
 fully readable by same-origin scripts, and the panel itself runs on localhost. Placing a key
 in the browser would be equivalent to handing it to any injected script.
 
-### How switching takes effect immediately
+#### How switching takes effect immediately
 
 Step Code resolves credentials through the model registry. The documentation states that
 `registerProvider`, when called after the initial load phase, **takes effect immediately
 without `/reload`**; the config form also overrides only the fields it receives, leaving the
 model catalogue intact.
 
-```
+```text
 click to switch → POST /api/profiles/activate → gateway writes activeId
                 → stdout emits action{apply_profile, profile}
                 → extension calls pi.registerProvider(provider, { apiKey })
@@ -274,7 +187,7 @@ click to switch → POST /api/profiles/activate → gateway writes activeId
 
 Because only `apiKey` (and optionally `baseUrl`) is passed, that provider's model list is not reset.
 
-### Detecting invalid credentials
+#### Detecting invalid credentials
 
 Rather than probing the endpoint, the extension **observes real traffic**: it subscribes to
 `after_provider_response` and, on 401 / 403, broadcasts `profile_status`. The panel then marks
@@ -283,7 +196,7 @@ the active profile in red with the reason. This produces no extra requests and n
 Static validation on the form side: name and provider are required; a key is required when
 creating; keys shorter than 12 characters are flagged as "unusual length".
 
-### Interaction design
+#### Interaction design
 
 | Element | Behaviour |
 |---|---|
@@ -296,15 +209,150 @@ creating; keys shorter than 12 characters are flagged as "unusual length".
 | Hover / press | Consistent with the mode switch: lifts 1 px / `scale(0.978)` |
 | Editing | Leaving the key blank keeps the stored value (merged server-side), so the browser never has to round-trip a secret it was never given |
 
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `STEP_ORCHESTRA_PORT` | No | Starting gateway port, default `47810`; conflicts resolve by incrementing (up to 12 attempts) |
+| `STEP_ORCHESTRA_BIN` | No | Overrides the gateway binary path (default: locate or build automatically) |
+| `STEP_ORCHESTRA_WEB` | No | Panel static directory; only the repository's `web/` is served, and any other path is ignored with a log line |
+| `STEP_ORCHESTRA_AUTOBUILD` | No | Set to `0` to disable the extension's first-run auto-build; enabled by default |
+
 ---
 
-## Token usage display
+## Architecture
+
+**Rationale.** Step Code's UI layer is `pi-tui`, which renders terminal characters differentially.
+Extensions have no public API for injecting custom graphical components, and a terminal
+cannot express real blur or refraction. Given that constraint, the system is divided
+across four processes by responsibility:
+
+| Layer | Responsibility |
+|---|---|
+| TypeScript extension | Normalises host events into JSONL and writes them to a child process's stdin; contains no business logic |
+| Go gateway | Reconstructs topology and maintains state, pushed over SSE |
+| Browser panel | Carries all graphical rendering and animation |
+| Reverse channel | Returns commands via the gateway's stdout, used to send messages and apply credentials |
+
+![Architecture](docs/architecture.svg)
+
+The principal benefit of this split is change isolation: host API adjustments affect only
+the `extensions/` directory, and the panel can be developed and debugged independently of Step Code.
+
+### Event contract
+
+The extension subscribes to the following host events (`pi.on(event, handler)`);
+field definitions defer to `extensions/types.ts`.
+
+| Host event | Purpose |
+|---|---|
+| `session_start` | Session metadata (ID / cwd / model) |
+| `agent_start` / `agent_end` / `agent_settled` | Turn and overall settlement |
+| `tool_call` | Node creation; `subagent` / `workflow` are flagged as orchestration nodes and their mode extracted |
+| `tool_execution_update` | **Primary source of orchestration progress.** The payload sits under `event.partialResult` on 0.1.1 and `event.details` on 0.84.x; both are parsed |
+| `tool_result` | Terminal node state, duration, token usage |
+| `message_start` / `message_update` / `message_end` | Conversation stream: `assistantMessageEvent.text_delta` accumulates into a streaming bubble |
+| `session_shutdown` | Shut the gateway down |
+
+`message_update` fires once per token; only `assistantMessageEvent.type === "text_delta"`
+increments are consumed. Thinking and tool-call deltas are not forwarded, as they already
+surface as tool nodes.
+
+#### Upstream resilience
+
+`extensions/progress.ts` maintains an **alias table** for each counter field
+(for example `running` covers `running` / `runningCount` / `active` / `activeCount`) and
+descends up to three levels through wrappers such as `partialResult`, `progress`,
+`workflowProgress`, `snapshot`, and `details`. A renamed host field degrades to a
+**partial read** rather than a blank panel.
+
+Observed differences between upstream versions:
+
+| Item | 0.1.1 | 0.84.x |
+|---|---|---|
+| Progress payload field | `event.partialResult` | `event.details` |
+| `subagent` tool | Provided by an example extension; arguments are `{agent\|tasks\|chain}` | Built in, with an additional `workflow` tool |
+| Install config location | `~/.stepcode/config.toml` | Documented as `settings.json` |
+| Package entry declaration | `"pi": { "extensions": [...] }` | — |
+
+`inferMode()` therefore derives the fan-out mode from **argument shape**: a `chain` array
+means chain, a `tasks` array means parallel, and `agent` or `task` means single.
+It does not depend on an explicit `mode` field.
+
+### Security design
+
+| Item | Measure |
+|---|---|
+| Network exposure | Bound to `127.0.0.1` only; port conflicts resolve by incrementing (up to 12 attempts). The `Host` header must also name `127.0.0.1` / `localhost`, defeating DNS rebinding |
+| Authentication | A 24-byte random token per run; every data endpoint validates it using constant-time comparison |
+| Token transport | The token lives only in the URL fragment (`#t=`), which is stripped from the address bar and history as soon as it is read. Read-only GETs may also use the query string; `POST` / `DELETE` accept **only** the `X-Orchestra-Token` header, so a token leaked from a URL cannot authorize a mutation |
+| Cross-site write protection | `POST` / `DELETE` validate `Origin`: absent means a local CLI (the token header still applies), present must equal the request `Host` exactly — anything else is 403 |
+| Static assets | Untokened (so the first paint costs one request) but restricted to the repository's `web/`: a `STEP_ORCHESTRA_WEB` pointing elsewhere is ignored with a log line, so an arbitrary directory is never exposed over loopback |
+| Credential leakage | Arguments pass through `redact.ts`: values under `key` / `token` / `secret` / `password` / `authorization` / `cookie` are replaced wholesale with `***` |
+| Payload growth | Strings truncate at 2048 characters, at most 24 keys per level, recursion depth capped at 4 |
+| Injection | The front end writes host data exclusively through `textContent`; `innerHTML` is used only for static icon paths declared in-file |
+| Data at rest | The gateway writes no browsing data; the token lives only in the extension process memory and the browser tab's `sessionStorage` |
+| First auto-build | When the binary is missing, the extension/launcher runs the local Go build on **repository source**: no network, no shell, no argument concatenation. It is equivalent to "installing means executing this repository" — an install trust model (see Known limitations) |
+
+### Conversation mode and view switching
+
+The panel hosts two views: **Orchestration** (tool and subagent topology) and
+**Conversation** (interaction with the agent). Both remain mounted within the same grid
+cell; switching only toggles visibility.
+
+#### The switch control
+
+| Item | Design |
+|---|---|
+| Position | Right end of the topbar, immediately left of the connection indicator; a global view control, not owned by either panel column |
+| Label | Shows the **target mode**: "Conversation" while in the orchestration view, "Orchestration" while in the conversation view |
+| Icon | Follows the label — a speech bubble when the target is conversation, a node graph when the target is orchestration; switched in CSS via `data-target`, without replacing DOM |
+| Hover | Lifts 1 px, border turns accent purple, glass highlight strengthens (240 ms) |
+| Press | `scale(0.972)`, transition compressed to 90 ms |
+| Focus | `:focus-visible` 2 px purple ring; keyboard reachable |
+| Mid-transition | `aria-busy="true"` with `pointer-events: none`, suppressing repeated activation within the 240 ms window |
+| Disabled | Switching is blocked while the event stream is down (`opacity: .45`, `cursor: not-allowed`, no hover feedback) |
+
+#### Why switching does not stutter, flicker, or shift
+
+| Risk | Handling |
+|---|---|
+| Layout shift | Both views overlap in the same `grid-area: stage` cell, so container size is constant |
+| Rebuild flicker | Views are **never unmounted**; switching only changes `opacity` and `visibility` |
+| Lost scroll | The DOM survives, so scroll positions in both the tree and the conversation are preserved |
+| Lost selection | The selected node is a DOM attribute and is unaffected by switching |
+| Lost draft | The input's DOM survives; both content and caret position persist |
+| Data reload | Switching issues **no requests**; SSE keeps writing to both views |
+| Animation races | The 240 ms `aria-busy` window suppresses repeat activation; `prefers-reduced-motion` reduces transitions to 0.01 ms |
+
+#### Conversation data flow
+
+```text
+input box ──POST /api/send──▶ gateway ──one JSON line on stdout──▶ extension ──pi.sendUserMessage()──▶ host
+host ──message_start/update/end──▶ extension (accumulates text_delta) ──▶ gateway ──SSE──▶ bubble updates in place
+```
+
+This reverse channel is the only downstream path in the system: stdin carries upstream
+events, stdout carries downstream commands.
+
+The send button's disabled state is a compound condition: empty input, or a downed event
+stream. **Sending while the agent is busy is allowed**: the extension downgrades
+automatically to `deliverAs: "followUp"` and queues the message. The message first appears
+locally as a translucent "pending" bubble and is replaced in place when the host replays it;
+on failure the original text returns to the input box.
+
+Message bubbles reuse DOM keyed by id, and streaming updates touch only the text node
+rather than rebuilding the list. Scrolling uses a bottom-pinning strategy (auto-follow
+within 72 px of the bottom, otherwise a "Back to bottom" button appears) so that scrolling
+back through history is not interrupted.
+
+### Token usage display
 
 A single line of metric text between the conversation log and the composer, modelled on the
 reply footer of
 [`Neriah-Ado/stepfun-usage-monitor`](https://github.com/Neriah-Ado/stepfun-usage-monitor).
 
-```
+```text
 537.3 tok/s · 首字 3.0s · 输出 223 tok / 生成 0.4s · 均值 494.9 · 累计 51.3k tok · 上下文 168k/200k · 接近上限 · 10:23:04
 ```
 
@@ -317,11 +365,11 @@ reply footer of
 | Clock | Right-aligned and monospaced; excluded from text truncation |
 | ≥75% / ≥92% | The whole line turns amber / red and appends "approaching limit" / "about to overflow, consider /compact" |
 
-### How throughput is computed
+#### How throughput is computed
 
 The only clock available to the extension layer is the event arrival timestamp, hence:
 
-```
+```text
 TTFT             = arrival of first text_delta − message_start
 generation time  = last text_delta − first text_delta
 tok/s            = this turn's output tokens ÷ generation time × 1000
@@ -333,7 +381,7 @@ delta arrives, `generationMs` is reported as `null` rather than 0, avoiding an a
 division in the front end. TTFT includes IPC latency and therefore reads high, which is
 acceptable for a gauge.
 
-### Why the context-window field is retained
+#### Why the context-window field is retained
 
 The reference project reports **throughput**, whereas the context window is **remaining
 headroom** — different semantics. The implementation therefore merges the two: the form and
@@ -341,9 +389,7 @@ number rules follow the reference, the fields are predominantly throughput-orien
 context window with its warning is retained, because "approaching the limit" is the only
 actionable signal on that line.
 
----
-
-## Performance mode (new in V2.0)
+### Performance mode
 
 The liquid-glass look spends GPU continuously on three fronts — the animated aurora,
 `backdrop-filter` sampling, and pointer-driven tilt/highlight. On modest hardware, or in a
@@ -358,9 +404,7 @@ background tab, that cost buys nothing. V2.0 adds a one-click reduction:
 | Background idle | Hidden tabs park the continuous animations (`html.perf-paused`) and resume on return |
 | Nothing lost | Status colouring (running/done/failed rails; breathing becomes a static ring) is fully preserved, as is hierarchy and readability |
 
----
-
-## Liquid glass implementation
+### Liquid glass implementation
 
 | Layer | Technique |
 |---|---|
@@ -370,6 +414,7 @@ background tab, that cost buys nothing. V2.0 adds a one-click reduction:
 | Depth | Cards follow `--rx` / `--ry` for a parallax tilt of at most 4.5° |
 | Liquid deformation | The empty-state halo applies SVG `feTurbulence` and `feDisplacementMap` |
 | Performance guards | Pointer events coalesced via rAF; node entrance animation uses `backwards` rather than `both` (the latter locks `transform` and breaks hover); `contain: layout paint`; the topbar "Performance" toggle reduces load in one click (see previous section) |
+| GPU guards | `backdrop-filter` is kept only on large surfaces such as the topbar and the two panels, never on node cards (per-card background sampling is the main cost at scale); the running-node "breathing" animation drives only a dedicated overlay's `opacity` instead of repainting `box-shadow` every frame; cards carry no permanent `will-change` |
 | Degradation | Without `backdrop-filter` support, panels fall back to high-opacity solid colour; `prefers-reduced-motion` disables all animation |
 
 > True refraction requires distorting the content behind the glass, and CSS cannot apply a
@@ -377,11 +422,9 @@ background tab, that cost buys nothing. V2.0 adds a one-click reduction:
 > highlight, inner shadow, and tilt working together; SVG displacement filters appear only on
 > decorative elements to avoid distorting text.
 
----
+### Project structure
 
-## Project structure
-
-```
+```text
 step-orchestra/
 ├── start.mjs            # One-click launcher: locate/build the gateway, run, open the browser
 ├── start.bat            #   Windows double-click entry
@@ -500,7 +543,7 @@ narrowing the window below 1080 px (where `.stage` collapses to a single column)
 | `/orchestra` reports a missing binary / Go unavailable | Run `start.bat` (or `npm start`) once; or install Go and run `/orchestra` again to trigger the auto-build |
 | start.bat closes instantly | Node.js ≥ 22 is not installed; install it from https://nodejs.org and retry |
 | Panel is stuck on "connecting" | Check that the `#t=` fragment is intact; the token changes on every run. The address bar drops `#t=` after load — that is expected |
-| Using an old `?t=` address | Query-string addresses from v2.0.0 and earlier are dead; rerun `/orchestra` and open the new `#t=` URL |
+| Using an old query-string address | Query-string addresses from v2.0.0 and earlier are dead; rerun `/orchestra` and open the new `#t=` URL |
 | Panel shows "session expired" | The gateway restarted with a fresh token; rerun `/orchestra` and open the newly printed address |
 | No nodes appear | Confirm the run uses `subagent` / `workflow`; ordinary tool calls require turning off the "orchestration only" filter |
 | Port already in use | Override the starting port with `STEP_ORCHESTRA_PORT=50000`, or `npm start -- --port 50000` |
@@ -509,10 +552,24 @@ narrowing the window below 1080 px (where `.stage` collapses to a single column)
 
 ---
 
+## Release notes
+
+| Version | Theme | Release notes |
+|---|---|---|
+| v2.0.0 | One-click startup, performance mode, and multi-round reliability verification | [docs/releases/v2.0.0.md](docs/releases/v2.0.0.md) |
+| v1.5.0 | Stability, concurrency correctness, and rendering performance fixes | [docs/releases/v1.5.0.md](docs/releases/v1.5.0.md) |
+| v1.0.0 | First public release | [docs/releases/v1.0.0.md](docs/releases/v1.0.0.md) |
+
+See [CHANGELOG.md](CHANGELOG.md) for version-by-version changes.
+
+---
+
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3
 (AGPL-3.0-only)**. The full licence text is in [LICENSE](LICENSE).
+
+© 2026 Neriah
 
 ### Restrictions and requirements
 
@@ -529,3 +586,5 @@ This project is licensed under the **GNU Affero General Public License v3
 - Derivative works may not be relicensed under more permissive terms;
 - No further restrictions conflicting with this licence may be imposed (GPLv3 section 10);
 - On violation the licence terminates automatically and must be reinstated by the copyright holder (section 8).
+
+Documentation style: [DOCS-STYLE](https://github.com/Neriah-Ado/Neriah-Ado/blob/main/docs/DOCS-STYLE.md)

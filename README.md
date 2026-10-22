@@ -1,30 +1,28 @@
 # StepFun Code-GUI
 
-**v2.0.0** · [简体中文](README.md) | [English](README.en.md)
+**v2.0.0** · **简体中文** · [English](README.en.md)
+
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A5%2022-339933.svg)](package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#快速开始)
 
 Step Code 的子代理编排可视化面板。终端中运行的 `subagent` / `workflow` 编排，
 以液态玻璃界面在浏览器中实时呈现。
 
 > 内部包名为 `step-orchestra`；仓库与产品名称为 StepFun Code-GUI。
 
-![架构图](docs/architecture.svg)
-
 ---
 
-## 架构设计依据
+## 功能特性
 
-Step Code 的 UI 层为 `pi-tui`，采用终端字符差分渲染，插件不具备注入自定义图形组件的公开 API；
-终端亦无法呈现真实的模糊与折射效果。基于此约束，系统按职责划分为四个进程：
-
-| 层 | 职责 |
-|---|---|
-| TypeScript 扩展 | 将宿主事件规范化为 JSONL 并写入子进程 stdin，不含业务逻辑 |
-| Go 网关 | 重建拓扑、维护状态，并通过 SSE 推送 |
-| 浏览器面板 | 承担全部图形渲染与动效 |
-| 反向通道 | 经网关 stdout 回传指令，用于发送消息与应用凭据 |
-
-该分层的主要收益在于变更隔离：宿主 API 调整仅影响 `extensions/` 目录，
-且面板可脱离 Step Code 独立开发与调试。
+- **实时编排拓扑** —— 订阅宿主事件重建 `tool_call` / `tool_update` / `tool_result` 拓扑，节点状态覆盖 pending / running / done / failed / cancelled。
+- **扇出模式推断** —— 按参数形状区分 single / parallel / chain（`agent` / `tasks` / `chain`），不依赖显式 `mode` 字段；模式徽标与任务摘要直接上卡。
+- **子代理明细与聚合指标** —— 节点详情展示子代理行、进度与脱敏参数；顶栏汇总运行中 / 已完成 / 失败 / 编排数与 token 总消耗。
+- **对话视图与无缝切换** —— 会话历史回放、80 ms 合帧流式气泡、贴底滚动；编排 ↔ 对话切换不卸载 DOM，滚动位置、选中节点与输入草稿全部保留。
+- **多账户 API 配置热切换** —— 凭据由网关持有，浏览器只见 `keyHint` 掩码；`registerProvider` 免重启生效，401 / 403 时标红并给出原因。
+- **Token 用量单行指标** —— `tok/s`、首字延迟、输出 / 生成耗时、均值、累计与上下文占用；≥75% / ≥92% 整行变色并提示。
+- **液态玻璃视觉** —— `backdrop-filter` 折射底、142° 玻璃体、指针高光、≤4.5° 视差倾斜与 SVG 位移滤镜，并提供 `prefers-reduced-motion` 降级。
+- **零命令行启用与性能模式** —— 双击 `start.bat` / `start.command` 自动构建并拉起网关；`npm run demo` 无需 Step Code 即可预览；性能模式一键降载，并在低配设备与后台标签页自动生效。
 
 ---
 
@@ -61,7 +59,9 @@ npm run build       # 等价于 go build（自动处理 Windows .exe 后缀）
 
 ---
 
-## 安装到 Step Code
+## 安装
+
+将扩展安装到 Step Code：
 
 ```bash
 step install /absolute/path/to/step-orchestra
@@ -70,14 +70,14 @@ step list
 
 安装完成后，在 Step Code 中执行 `/orchestra`，将输出面板地址：
 
-```
+```text
 [step-orchestra] panel: http://127.0.0.1:47810/#t=<token>
 ```
 
 token 位于 URL **片段**（`#t=`），不会发送给服务器、不会进入 `Referer`；
 页面加载后 `web/token.js` 会立即用 `history.replaceState` 把地址栏还原为
 `http://127.0.0.1:47810/`，并按标签页保存在 `sessionStorage` 中，因此刷新可用、
-复制出的地址不含密钥。**v2.0.0 及更早版本的 `?t=` 地址不再可用**，请重新运行
+复制出的地址不含密钥。**v2.0.0 及更早版本使用的查询串地址已不再可用**，请重新运行
 `/orchestra` 获取新地址。
 
 网关随扩展加载自动启动，并在会话结束时退出，无需额外配置。
@@ -107,115 +107,36 @@ packages = [ "E:\\Project\\...\\step-orchestra" ]
 
 ---
 
-## 事件契约
+## 使用与命令
 
-扩展订阅以下宿主事件（`pi.on(event, handler)`），字段定义以 `extensions/types.ts` 为准。
-
-| 宿主事件 | 用途 |
+| 命令 | 作用 |
 |---|---|
-| `session_start` | 会话元信息（ID / cwd / 模型） |
-| `agent_start` / `agent_end` / `agent_settled` | 轮次与整体结算 |
-| `tool_call` | 节点创建；`subagent` / `workflow` 标记为编排节点并提取模式 |
-| `tool_execution_update` | **编排进度的主数据源**。0.1.1 载荷位于 `event.partialResult`，0.84.x 位于 `event.details`，两者均予解析 |
-| `tool_result` | 节点终态、耗时、token 用量 |
-| `message_start` / `message_update` / `message_end` | 对话流：取 `assistantMessageEvent.text_delta` 累积为流式气泡 |
-| `session_shutdown` | 关闭网关 |
+| `npm start` | 一键启动：定位或构建网关、启动并在默认浏览器打开面板 |
+| `npm run demo` | 回放内置场景，无需安装 Step Code |
+| `npm run build` | 仅构建网关二进制 |
+| `npm test` | 运行聚合测试（go vet / go test / 模块图 / 载荷解析 / 层叠 / 启动器 / 端到端） |
+| `step install <路径>` | 将扩展安装到 Step Code |
+| `step -e <入口路径>` | 临时加载扩展，绕过安装流程 |
+| `/orchestra` | 在 Step Code 中输出面板地址并启动网关 |
 
-`message_update` 按 token 触发，仅取 `assistantMessageEvent.type === "text_delta"` 的增量；
-thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈现。
+最小示例：
 
-### 上游健壮性
-
-`extensions/progress.ts` 为每个计数字段维护一份**别名表**
-（如 `running` 对应 `running` / `runningCount` / `active` / `activeCount`），
-并在 `partialResult` / `progress` / `workflowProgress` / `snapshot` / `details`
-等包装层下钻至多三层。宿主重命名字段时降级为**部分读取**，而非整块面板空白。
-
-上游版本间存在实测差异：
-
-| 项 | 0.1.1 | 0.84.x |
-|---|---|---|
-| 进度载荷字段 | `event.partialResult` | `event.details` |
-| `subagent` 工具 | 由示例扩展提供，参数为 `{agent\|tasks\|chain}` | 内置，另有 `workflow` 工具 |
-| 安装配置落点 | `~/.stepcode/config.toml` | 文档称 `settings.json` |
-| 包入口声明 | `"pi": { "extensions": [...] }` | — |
-
-因此 `inferMode()` 依据**参数形状**推断扇出模式：存在 `chain` 数组判定为 chain，
-存在 `tasks` 数组判定为 parallel，存在 `agent` 或 `task` 判定为 single，
-不依赖显式的 `mode` 字段。
-
----
-
-## 安全设计
-
-| 项 | 措施 |
-|---|---|
-| 网络暴露 | 仅绑定 `127.0.0.1`，端口冲突时自动顺延（至多 12 次）；并校验 `Host` 必须为 `127.0.0.1` / `localhost`，阻断 DNS rebinding |
-| 鉴权 | 每次运行生成 24 字节随机 token；所有数据端点校验，采用常数时间比较 |
-| token 传递 | token 只放在 URL 片段（`#t=`），页面读取后立即从地址栏与历史记录中清除；只读 GET 额外接受查询参数，`POST` / `DELETE` **只接受 `X-Orchestra-Token` 请求头**，因此从 UI 地址泄露的 token 无法用于写操作 |
-| 跨站写保护 | `POST` / `DELETE` 校验 `Origin`：缺失视为本地 CLI（仍需 token 头），存在则必须与请求 `Host` 完全一致，否则返回 403 |
-| 静态资源 | 无 token 校验（首屏无需额外请求），但只服务仓库内 `web/`；`STEP_ORCHESTRA_WEB` 若指向其他目录会被忽略并记日志，避免把任意目录暴露到回环地址 |
-| 凭据泄露 | 参数经 `redact.ts` 处理：`key` / `token` / `secret` / `password` / `authorization` / `cookie` 等键整值替换为 `***` |
-| 体积膨胀 | 单字符串截断至 2048 字符，每层至多 24 个键，递归深度上限为 4 |
-| 注入 | 前端一律以 `textContent` 写入宿主数据；`innerHTML` 仅用于本文件内声明的静态图标路径 |
-| 数据落盘 | 网关不写浏览数据；token 仅在扩展进程内存与浏览器同标签的 `sessionStorage` 中流转 |
-| 首次自动构建 | 扩展/启动器在二进制缺失时调用本机 Go 构建**仓库内源码**：不联网、不启用 shell、不拼接参数；等价于“安装即执行该仓库”，属安装信任模型（见「已知限制」） |
-
----
-
-## 对话模式与视图切换
-
-面板包含两个视图：**编排**（工具与子代理拓扑）与**对话**（与 agent 的交互）。
-二者在同一 grid 单元格内常驻挂载，切换操作仅翻转可见性。
-
-### 切换按钮
-
-| 项 | 设计 |
-|---|---|
-| 位置 | topbar 右端、连接状态指示灯左侧，属全局视图控件，不隶属任一列面板 |
-| 文案 | 显示**目标模式**：编排视图下显示「对话」，对话视图下显示「编排」 |
-| 图标 | 与文案联动，目标为对话时显示气泡，目标为编排时显示节点图；由 CSS 依据 `data-target` 切换，不替换 DOM |
-| 悬停 | 上浮 1 px、描边转主题紫、玻璃高光增强（240 ms） |
-| 按下 | `scale(0.972)`，过渡压缩至 90 ms |
-| 焦点 | `:focus-visible` 2 px 紫色外圈，支持键盘可达 |
-| 过渡中 | `aria-busy="true"` 配合 `pointer-events: none`，在 240 ms 窗口内抑制重复触发 |
-| 禁用 | 事件流断开时禁止切换（`opacity: .45`、`cursor: not-allowed`、无悬停反馈） |
-
-### 切换过程的稳定性保障
-
-| 风险 | 处理 |
-|---|---|
-| 布局跳动 | 两视图共享同一 `grid-area: stage` 单元格重叠，容器尺寸恒定 |
-| 重建闪烁 | 视图**不卸载**，切换仅改变 `opacity` 与 `visibility` |
-| 滚动丢失 | DOM 存活，编排树与对话的滚动位置原样保留 |
-| 选中丢失 | 选中节点为 DOM 属性，不随切换变化 |
-| 草稿丢失 | 输入框 DOM 存活，切换后内容与光标位置均保留 |
-| 数据重载 | 切换**不发起任何请求**；SSE 持续写入两个视图 |
-| 动画竞态 | 240 ms `aria-busy` 窗口抑制重复触发；`prefers-reduced-motion` 下过渡降至 0.01 ms |
-
-### 对话数据流
-
-```
-输入框 ──POST /api/send──▶ 网关 ──stdout 单行 JSON──▶ 扩展 ──pi.sendUserMessage()──▶ 宿主
-宿主 ──message_start/update/end──▶ 扩展（累积 text_delta）──▶ 网关 ──SSE──▶ 气泡原地更新
+```bash
+npm start
 ```
 
-上述反向通道为系统内唯一的下行路径：stdin 承载上行事件，stdout 承载下行指令。
-
-发送按钮的禁用条件为复合判定：输入为空，或事件流断开。**agent 忙碌时仍可发送**：
-扩展将自动降级为 `deliverAs: "followUp"` 排队等待；消息在本地先以半透明「待达」
-气泡回显，宿主回放后原位替换，发送失败时原文回填输入框。
-
-消息气泡按 id 复用 DOM，流式更新仅修改文本节点，不重建列表。滚动采用贴底策略
-（距底部不足 72 px 时自动跟随，否则显示「回到底部」按钮），避免打断向上翻阅。
+启动后浏览器自动打开面板。已安装扩展时，可在 Step Code 中执行 `/orchestra`
+获取带 token 的面板地址（token 每次运行都会变化）。
 
 ---
 
-## API 配置切换
+## 配置
+
+### API 配置切换
 
 支持在多个账户的 coding Plan 之间切换，无需重启。
 
-### 配置存储
+#### 配置存储
 
 | 项 | 决定 |
 |---|---|
@@ -240,13 +161,13 @@ thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈�
 选择由网关持有明文，而不使用浏览器 localStorage：localStorage 对同源脚本完全可读，
 而面板本身运行于 localhost，将密钥置于浏览器等同于交付给任意注入脚本。
 
-### 切换的即时生效机制
+#### 切换的即时生效机制
 
 Step Code 的凭据经由 model registry 解析。官方文档明确：`registerProvider`
 在初始加载阶段之后调用**立即生效，无需 `/reload`**；且配置形式仅覆盖传入字段，
 模型目录保持不变。
 
-```
+```text
 点击切换 → POST /api/profiles/activate → 网关写 activeId
         → stdout 下发 action{apply_profile, profile}
         → 扩展 pi.registerProvider(provider, { apiKey })
@@ -255,7 +176,7 @@ Step Code 的凭据经由 model registry 解析。官方文档明确：`register
 
 由于仅传入 `apiKey`（及可选的 `baseUrl`），该 provider 的模型列表不会被重置。
 
-### 失效检测
+#### 失效检测
 
 不主动探测端点，而是**监听真实流量**：扩展订阅 `after_provider_response`，
 收到 401 / 403 时广播 `profile_status`，面板将当前配置标红并给出原因。
@@ -264,7 +185,7 @@ Step Code 的凭据经由 model registry 解析。官方文档明确：`register
 表单侧的静态校验：名称与 provider 为必填；新增时密钥为必填；
 密钥长度不足 12 字符标记为「长度异常」。
 
-### 交互设计
+#### 交互设计
 
 | 元素 | 行为 |
 |---|---|
@@ -277,15 +198,139 @@ Step Code 的凭据经由 model registry 解析。官方文档明确：`register
 | 悬停 / 按下 | 与模式切换键一致：上浮 1 px / `scale(0.978)` |
 | 编辑 | 密钥留空即保留原值（由服务端合并），浏览器无需回填未曾获得的密钥 |
 
+### 环境变量
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `STEP_ORCHESTRA_PORT` | 否 | 网关起始端口，默认 `47810`；冲突时自动顺延（至多 12 次） |
+| `STEP_ORCHESTRA_BIN` | 否 | 覆盖网关二进制路径（默认自动定位或构建） |
+| `STEP_ORCHESTRA_WEB` | 否 | 面板静态目录；仅接受仓库内 `web/`，其他路径会被忽略并记日志 |
+| `STEP_ORCHESTRA_AUTOBUILD` | 否 | 设为 `0` 关闭扩展侧首次自动构建；默认开启 |
+
 ---
 
-## Token 用量显示
+## 架构
+
+**设计依据。** Step Code 的 UI 层为 `pi-tui`，采用终端字符差分渲染，插件不具备注入自定义图形组件的公开 API；
+终端亦无法呈现真实的模糊与折射效果。基于此约束，系统按职责划分为四个进程：
+
+| 层 | 职责 |
+|---|---|
+| TypeScript 扩展 | 将宿主事件规范化为 JSONL 并写入子进程 stdin，不含业务逻辑 |
+| Go 网关 | 重建拓扑、维护状态，并通过 SSE 推送 |
+| 浏览器面板 | 承担全部图形渲染与动效 |
+| 反向通道 | 经网关 stdout 回传指令，用于发送消息与应用凭据 |
+
+![架构图](docs/architecture.svg)
+
+该分层的主要收益在于变更隔离：宿主 API 调整仅影响 `extensions/` 目录，
+且面板可脱离 Step Code 独立开发与调试。
+
+### 事件契约
+
+扩展订阅以下宿主事件（`pi.on(event, handler)`），字段定义以 `extensions/types.ts` 为准。
+
+| 宿主事件 | 用途 |
+|---|---|
+| `session_start` | 会话元信息（ID / cwd / 模型） |
+| `agent_start` / `agent_end` / `agent_settled` | 轮次与整体结算 |
+| `tool_call` | 节点创建；`subagent` / `workflow` 标记为编排节点并提取模式 |
+| `tool_execution_update` | **编排进度的主数据源**。0.1.1 载荷位于 `event.partialResult`，0.84.x 位于 `event.details`，两者均予解析 |
+| `tool_result` | 节点终态、耗时、token 用量 |
+| `message_start` / `message_update` / `message_end` | 对话流：取 `assistantMessageEvent.text_delta` 累积为流式气泡 |
+| `session_shutdown` | 关闭网关 |
+
+`message_update` 按 token 触发，仅取 `assistantMessageEvent.type === "text_delta"` 的增量；
+thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈现。
+
+#### 上游健壮性
+
+`extensions/progress.ts` 为每个计数字段维护一份**别名表**
+（如 `running` 对应 `running` / `runningCount` / `active` / `activeCount`），
+并在 `partialResult` / `progress` / `workflowProgress` / `snapshot` / `details`
+等包装层下钻至多三层。宿主重命名字段时降级为**部分读取**，而非整块面板空白。
+
+上游版本间存在实测差异：
+
+| 项 | 0.1.1 | 0.84.x |
+|---|---|---|
+| 进度载荷字段 | `event.partialResult` | `event.details` |
+| `subagent` 工具 | 由示例扩展提供，参数为 `{agent\|tasks\|chain}` | 内置，另有 `workflow` 工具 |
+| 安装配置落点 | `~/.stepcode/config.toml` | 文档称 `settings.json` |
+| 包入口声明 | `"pi": { "extensions": [...] }` | — |
+
+因此 `inferMode()` 依据**参数形状**推断扇出模式：存在 `chain` 数组判定为 chain，
+存在 `tasks` 数组判定为 parallel，存在 `agent` 或 `task` 判定为 single，
+不依赖显式的 `mode` 字段。
+
+### 安全设计
+
+| 项 | 措施 |
+|---|---|
+| 网络暴露 | 仅绑定 `127.0.0.1`，端口冲突时自动顺延（至多 12 次）；并校验 `Host` 必须为 `127.0.0.1` / `localhost`，阻断 DNS rebinding |
+| 鉴权 | 每次运行生成 24 字节随机 token；所有数据端点校验，采用常数时间比较 |
+| token 传递 | token 只放在 URL 片段（`#t=`），页面读取后立即从地址栏与历史记录中清除；只读 GET 额外接受查询参数，`POST` / `DELETE` **只接受 `X-Orchestra-Token` 请求头**，因此从 UI 地址泄露的 token 无法用于写操作 |
+| 跨站写保护 | `POST` / `DELETE` 校验 `Origin`：缺失视为本地 CLI（仍需 token 头），存在则必须与请求 `Host` 完全一致，否则返回 403 |
+| 静态资源 | 无 token 校验（首屏无需额外请求），但只服务仓库内 `web/`；`STEP_ORCHESTRA_WEB` 若指向其他目录会被忽略并记日志，避免把任意目录暴露到回环地址 |
+| 凭据泄露 | 参数经 `redact.ts` 处理：`key` / `token` / `secret` / `password` / `authorization` / `cookie` 等键整值替换为 `***` |
+| 体积膨胀 | 单字符串截断至 2048 字符，每层至多 24 个键，递归深度上限为 4 |
+| 注入 | 前端一律以 `textContent` 写入宿主数据；`innerHTML` 仅用于本文件内声明的静态图标路径 |
+| 数据落盘 | 网关不写浏览数据；token 仅在扩展进程内存与浏览器同标签的 `sessionStorage` 中流转 |
+| 首次自动构建 | 扩展/启动器在二进制缺失时调用本机 Go 构建**仓库内源码**：不联网、不启用 shell、不拼接参数；等价于“安装即执行该仓库”，属安装信任模型（见「已知限制」） |
+
+### 对话模式与视图切换
+
+面板包含两个视图：**编排**（工具与子代理拓扑）与**对话**（与 agent 的交互）。
+二者在同一 grid 单元格内常驻挂载，切换操作仅翻转可见性。
+
+#### 切换按钮
+
+| 项 | 设计 |
+|---|---|
+| 位置 | topbar 右端、连接状态指示灯左侧，属全局视图控件，不隶属任一列面板 |
+| 文案 | 显示**目标模式**：编排视图下显示「对话」，对话视图下显示「编排」 |
+| 图标 | 与文案联动，目标为对话时显示气泡，目标为编排时显示节点图；由 CSS 依据 `data-target` 切换，不替换 DOM |
+| 悬停 | 上浮 1 px、描边转主题紫、玻璃高光增强（240 ms） |
+| 按下 | `scale(0.972)`，过渡压缩至 90 ms |
+| 焦点 | `:focus-visible` 2 px 紫色外圈，支持键盘可达 |
+| 过渡中 | `aria-busy="true"` 配合 `pointer-events: none`，在 240 ms 窗口内抑制重复触发 |
+| 禁用 | 事件流断开时禁止切换（`opacity: .45`、`cursor: not-allowed`、无悬停反馈） |
+
+#### 切换过程的稳定性保障
+
+| 风险 | 处理 |
+|---|---|
+| 布局跳动 | 两视图共享同一 `grid-area: stage` 单元格重叠，容器尺寸恒定 |
+| 重建闪烁 | 视图**不卸载**，切换仅改变 `opacity` 与 `visibility` |
+| 滚动丢失 | DOM 存活，编排树与对话的滚动位置原样保留 |
+| 选中丢失 | 选中节点为 DOM 属性，不随切换变化 |
+| 草稿丢失 | 输入框 DOM 存活，切换后内容与光标位置均保留 |
+| 数据重载 | 切换**不发起任何请求**；SSE 持续写入两个视图 |
+| 动画竞态 | 240 ms `aria-busy` 窗口抑制重复触发；`prefers-reduced-motion` 下过渡降至 0.01 ms |
+
+#### 对话数据流
+
+```text
+输入框 ──POST /api/send──▶ 网关 ──stdout 单行 JSON──▶ 扩展 ──pi.sendUserMessage()──▶ 宿主
+宿主 ──message_start/update/end──▶ 扩展（累积 text_delta）──▶ 网关 ──SSE──▶ 气泡原地更新
+```
+
+上述反向通道为系统内唯一的下行路径：stdin 承载上行事件，stdout 承载下行指令。
+
+发送按钮的禁用条件为复合判定：输入为空，或事件流断开。**agent 忙碌时仍可发送**：
+扩展将自动降级为 `deliverAs: "followUp"` 排队等待；消息在本地先以半透明「待达」
+气泡回显，宿主回放后原位替换，发送失败时原文回填输入框。
+
+消息气泡按 id 复用 DOM，流式更新仅修改文本节点，不重建列表。滚动采用贴底策略
+（距底部不足 72 px 时自动跟随，否则显示「回到底部」按钮），避免打断向上翻阅。
+
+### Token 用量显示
 
 位于对话视图底部、输入框上方的单行指标文本，形式参照
 [`Neriah-Ado/stepfun-usage-monitor`](https://github.com/Neriah-Ado/stepfun-usage-monitor)
 的回复底部指标行。
 
-```
+```text
 537.3 tok/s · 首字 3.0s · 输出 223 tok / 生成 0.4s · 均值 494.9 · 累计 51.3k tok · 上下文 168k/200k · 接近上限 · 10:23:04
 ```
 
@@ -298,11 +343,11 @@ Step Code 的凭据经由 model registry 解析。官方文档明确：`register
 | 时刻 | 右对齐、等宽，不参与文本截断 |
 | ≥75% / ≥92% | 整行转琥珀色 / 红色，并追加「接近上限」/「即将溢出，建议 /compact」 |
 
-### 速率的计算方式
+#### 速率的计算方式
 
 扩展层可用的时钟仅为事件到达时间戳，因此：
 
-```
+```text
 TTFT      = 首个 text_delta 到达 − message_start
 生成耗时   = 最后一个 text_delta − 第一个 text_delta
 tok/s     = 本轮输出 token ÷ 生成耗时 × 1000
@@ -312,15 +357,13 @@ tok/s     = 本轮输出 token ÷ 生成耗时 × 1000
 仅存在单个 delta 时 `generationMs` 记为 `null` 而非 0，避免前端得出异常数值。
 TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 
-### 「上下文占用」字段的保留依据
+#### 「上下文占用」字段的保留依据
 
 参照项目呈现的是**速率**，而本项目所需的上下文占用是**窗口余量**，两者语义不同。
 因此实现采取融合方案：形式与数字规则沿用参照项目，字段以速率类为主，
 同时保留上下文占用与告警 —— 因为「接近上限」是该行内唯一可行动的信号。
 
----
-
-## 性能模式（V2.0 新增）
+### 性能模式
 
 液态玻璃的三个持续 GPU 开销来源——极光背景动画、`backdrop-filter` 采样、
 指针视差/高光——在低配设备与后台标签页上纯属浪费。V2.0 为此引入一键降载：
@@ -334,9 +377,7 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 | 后台休眠 | 标签页隐藏时自动暂停极光等持续动画（`html.perf-paused`），回到前台恢复 |
 | 降级不降级面 | 状态色（运行/完成/失败 rail、呼吸改为静态描边）全部保留，层级与可读性不受影响 |
 
----
-
-## 液态玻璃实现
+### 液态玻璃实现
 
 | 层次 | 手段 |
 |---|---|
@@ -352,11 +393,9 @@ TTFT 包含 IPC 延迟，读数偏高，作为仪表指示可接受。
 > 真实折射需要扭曲背景内容，而 CSS 无法对 `backdrop` 施加位移滤镜。
 > 因此折射感由高光、内阴影与倾斜共同营造；SVG 位移滤镜仅用于装饰性元素，以避免文字扭曲。
 
----
+### 项目结构
 
-## 项目结构
-
-```
+```text
 step-orchestra/
 ├── start.mjs            # 一键启动器：定位/构建网关、启动、自动开浏览器
 ├── start.bat            #   Windows 双击入口
@@ -390,11 +429,11 @@ step-orchestra/
 │   └── architecture.svg #   架构图
 └── tools/
     ├── mock-feed.mjs    # 端到端验证（编排 + 对话 + 反向通道 + 凭据 + 用量）
-    ├── test-progress.mjs#   宿主载荷解析回归
-    ├── test-launcher.mjs#   启动器单元回归（V2.0 新增）
-    ├── test-token.mjs   #   面板 token 引导回归（fragment / 地址栏 / sessionStorage）
+    ├── test-progress.mjs# 宿主载荷解析回归
+    ├── test-launcher.mjs# 启动器单元回归（V2.0 新增）
+    ├── test-token.mjs   # 面板 token 引导回归（fragment / 地址栏 / sessionStorage）
     ├── test-extension-import.mjs # 扩展模块图冒烟（V2.0 新增）
-    ├── run-all-tests.mjs#   聚合入口，支持 --rounds 多轮（V2.0 新增）
+    ├── run-all-tests.mjs# 聚合入口，支持 --rounds 多轮（V2.0 新增）
     └── check-layers.mjs # 层叠关系静态校验
 ```
 
@@ -468,7 +507,7 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 | `/orchestra` 提示 binary missing / Go 不可用 | 双击 `start.bat`（或 `npm start`）一次；或安装 Go 后运行 `/orchestra` 触发自动构建 |
 | 双击 start.bat 闪退 | 未安装 Node.js ≥ 22，从 https://nodejs.org 安装后重试 |
 | 面板持续显示「连接中」 | 检查地址中的 `#t=` 片段是否完整；token 每次运行均会变化。页面加载后地址栏中的 `#t=` 会被清除，属正常现象 |
-| 使用旧 `?t=` 地址 | v2.0.0 及更早的查询串地址已失效；重新运行 `/orchestra`，使用输出的 `#t=` 新地址 |
+| 使用旧版查询串地址 | v2.0.0 及更早的查询串地址已失效；重新运行 `/orchestra`，使用输出的 `#t=` 新地址 |
 | 面板显示「会话已失效」 | 网关进程已重启并更换了 token，重新运行 `/orchestra` 打印新地址后打开 |
 | 节点未出现 | 确认触发的是 `subagent` / `workflow`；普通工具调用需关闭「仅编排」筛选 |
 | 端口被占用 | 通过 `STEP_ORCHESTRA_PORT=50000` 环境变量覆盖起始端口，或 `npm start -- --port 50000` |
@@ -477,10 +516,24 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 
 ---
 
+## 发布说明
+
+| 版本 | 主题 | 发布说明 |
+|---|---|---|
+| v2.0.0 | 一键启用、性能模式与多轮可靠性验证 | [docs/releases/v2.0.0.md](docs/releases/v2.0.0.md) |
+| v1.5.0 | 稳定性、并发正确性与渲染性能修复 | [docs/releases/v1.5.0.md](docs/releases/v1.5.0.md) |
+| v1.0.0 | 首个公开版本 | [docs/releases/v1.0.0.md](docs/releases/v1.0.0.md) |
+
+逐版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
 ## 许可证
 
 本项目采用 **GNU Affero 通用公共许可证第 3 版（AGPL-3.0-only）**。
 完整许可文本见 [LICENSE](LICENSE)。
+
+© 2026 Neriah
 
 ### 使用限制与要求
 
@@ -497,3 +550,5 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 - 不得将衍生作品改为更宽松的许可证；
 - 不得附加与本许可证相冲突的进一步限制（GPLv3 第 10 条）；
 - 违反许可证时授权自动终止，须由版权人恢复（第 8 条）。
+
+文档规范：[DOCS-STYLE](https://github.com/Neriah-Ado/Neriah-Ado/blob/main/docs/DOCS-STYLE.md)
