@@ -43,7 +43,7 @@ const child = spawn(BINARY, [], {
 });
 
 let panelUrl = null;
-const PANEL_URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/;
+const PANEL_URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+/;
 
 /**
  * Actions the gateway writes back toward the extension. Captured here so the
@@ -80,9 +80,9 @@ child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 const now = () => Date.now();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-/** Pull the bearer token out of the panel URL the gateway printed. */
+/** Pull the bearer token out of the panel URL's fragment. */
 function tokenFrom(url) {
-	const match = url.match(/[?&]t=([A-Za-z0-9_-]+)/);
+	const match = url.match(/[#?&]t=([A-Za-z0-9_-]+)/);
 	return match ? match[1] : "";
 }
 const send = (message) =>
@@ -326,8 +326,14 @@ async function scenario() {
 		process.exit(1);
 	}
 
-	const snapshotUrl = panelUrl.replace("/?t=", "/api/snapshot?t=");
-	const response = await fetch(snapshotUrl);
+	// The fragment carries the token; strip it for HTTP requests. Reads may use
+	// the query form, writes must send the token header.
+	const base = panelUrl.replace(/#.*$/, "");
+	const authToken = tokenFrom(panelUrl);
+	const readUrl = (path) =>
+		base + path + (path.indexOf("?") === -1 ? "?" : "&") + "t=" + authToken;
+
+	const response = await fetch(readUrl("/api/snapshot"));
 	if (!response.ok) {
 		console.error(`[mock] FAIL: snapshot request returned ${response.status}`);
 		child.kill();
@@ -366,15 +372,32 @@ async function scenario() {
 	);
 
 	// --- reverse channel: browser -> gateway -> extension -----------------
-	const base = panelUrl.replace(/\?.*$/, "");
-	const authToken = tokenFrom(panelUrl);
-
 	const denied = await fetch(base + "/api/send", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ text: "should be rejected" }),
 	});
 	check("send without token rejected", denied.status === 401, "status " + denied.status);
+
+	// A token that leaked through the URL must not authorize a mutation.
+	const queryOnly = await fetch(base + "/api/send?t=" + authToken, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ text: "query token must not write" }),
+	});
+	check("query token cannot authorize a write", queryOnly.status === 401, "status " + queryOnly.status);
+
+	// Cross-site browsers can reach loopback; the Origin check is what stops them.
+	const crossSite = await fetch(base + "/api/send", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Orchestra-Token": authToken,
+			Origin: "https://attacker.example",
+		},
+		body: JSON.stringify({ text: "cross-site attempt" }),
+	});
+	check("cross-site origin rejected", crossSite.status === 403, "status " + crossSite.status);
 
 	const accepted = await fetch(base + "/api/send", {
 		method: "POST",
@@ -395,12 +418,34 @@ async function scenario() {
 		send({ kind: "action_ack", ts: now(), requestId: reverseActions[0].requestId, ok: true });
 	}
 
+	// The browser's own POST carries an Origin equal to the page authority.
+	const sameOrigin = await fetch(base + "/api/send", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-Orchestra-Token": authToken,
+			Origin: new URL(base).origin,
+		},
+		body: JSON.stringify({ text: "same-origin write" }),
+	});
+	check("same-origin write accepted", sameOrigin.status === 200, "status " + sameOrigin.status);
+
+	// Static assets load before any token exists in the page; only the bundled
+	// web/ directory is ever exposed this way.
+	const page = await fetch(base + "/");
+	const pageBody = await page.text();
+	check(
+		"static panel served without a token",
+		page.status === 200 && pageBody.includes("<!DOCTYPE html>"),
+		"status " + page.status
+	);
+
 	// --- credential profiles ---------------------------------------------
 	const profileUrl = base + "/api/profiles";
 	const jsonHeaders = { "Content-Type": "application/json", "X-Orchestra-Token": authToken };
 	const SECRET = "sk-mock-abcdef1234567890";
 
-	const created = await fetch(profileUrl + "?t=" + authToken, {
+	const created = await fetch(profileUrl, {
 		method: "POST",
 		headers: jsonHeaders,
 		body: JSON.stringify({ name: "个人 Plan", provider: "step", apiKey: SECRET }),
@@ -414,7 +459,7 @@ async function scenario() {
 	check("profiles.json written to disk", onDisk.includes(SECRET), profileFile);
 	check("profiles.json is version-stamped", onDisk.includes('"version": 1'), profileFile);
 
-	const roster = await (await fetch(profileUrl + "?t=" + authToken)).json();
+	const roster = await (await fetch(readUrl("/api/profiles"))).json();
 	check(
 		"profile persisted",
 		Array.isArray(roster.profiles) && roster.profiles.length === 1,
@@ -432,14 +477,14 @@ async function scenario() {
 	);
 
 	// Editing without a key must keep the stored secret.
-	const edited = await fetch(profileUrl + "?t=" + authToken, {
+	const edited = await fetch(profileUrl, {
 		method: "POST",
 		headers: jsonHeaders,
 		body: JSON.stringify({ id: createdBody.id, name: "个人 Plan（改名）", provider: "step", apiKey: "" }),
 	});
 	check("metadata edit accepted", edited.status === 200, "status " + edited.status);
 
-	const afterEdit = await (await fetch(profileUrl + "?t=" + authToken)).json();
+	const afterEdit = await (await fetch(readUrl("/api/profiles"))).json();
 	check(
 		"blank key preserves the stored secret",
 		afterEdit.profiles?.[0]?.keyHint === "sk-m…7890" && afterEdit.profiles?.[0]?.name === "个人 Plan（改名）",
@@ -449,7 +494,7 @@ async function scenario() {
 	// --- activation pushes the credential to the host --------------------
 	reverseActions.length = 0;
 
-	const activated = await fetch(profileUrl + "/activate?t=" + authToken, {
+	const activated = await fetch(profileUrl + "/activate", {
 		method: "POST",
 		headers: jsonHeaders,
 		body: JSON.stringify({ id: createdBody.id }),
@@ -464,17 +509,24 @@ async function scenario() {
 		applied ? applied.profile.provider : "none"
 	);
 
-	const afterActivate = await (await fetch(profileUrl + "?t=" + authToken)).json();
+	const afterActivate = await (await fetch(readUrl("/api/profiles"))).json();
 	check("active profile reported", afterActivate.activeId === createdBody.id, afterActivate.activeId);
 
 	// --- removal ----------------------------------------------------------
-	const removed = await fetch(profileUrl + "?t=" + authToken + "&id=" + encodeURIComponent(createdBody.id), {
+	// A query-string token must not authorize the delete either.
+	const deleteQueryOnly = await fetch(
+		profileUrl + "?t=" + authToken + "&id=" + encodeURIComponent(createdBody.id),
+		{ method: "DELETE" }
+	);
+	check("query token cannot authorize profile deletion", deleteQueryOnly.status === 401, "status " + deleteQueryOnly.status);
+
+	const removed = await fetch(profileUrl + "?id=" + encodeURIComponent(createdBody.id), {
 		method: "DELETE",
 		headers: { "X-Orchestra-Token": authToken },
 	});
 	check("profile delete accepted", removed.status === 200, "status " + removed.status);
 
-	const finalRoster = await (await fetch(profileUrl + "?t=" + authToken)).json();
+	const finalRoster = await (await fetch(readUrl("/api/profiles"))).json();
 	check(
 		"profile removed and active cleared",
 		Array.isArray(finalRoster.profiles) &&

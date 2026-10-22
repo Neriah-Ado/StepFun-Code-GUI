@@ -12,7 +12,9 @@
 	var chat = global.OrchestraChat;
 	var profiles = global.OrchestraProfiles;
 
-	var token = new URLSearchParams(global.location.search).get("t") || "";
+	// The token is bootstrapped by token.js from the URL fragment, which is
+	// stripped from the address bar before this script runs.
+	var token = global.OrchestraToken || "";
 
 	var state = { session: {}, run: {}, nodes: [], usage: { used: 0, limit: 0 } };
 	var nodeIndex = new Map();
@@ -335,7 +337,7 @@
 		resyncing = true;
 
 		global
-			.fetch("/api/snapshot?t=" + encodeURIComponent(token), {
+			.fetch("/api/snapshot", {
 				headers: { "X-Orchestra-Token": token },
 			})
 			.then(function (response) {
@@ -415,13 +417,19 @@
 	// The composer hands us raw text; the gateway relays it to the extension,
 	// which calls pi.sendUserMessage on the host. The message is echoed
 	// locally right away so a slow host never looks like a dropped send.
+	//
+	// Mutations carry the token in the header only: the gateway rejects a
+	// query-string token on anything but a read-only GET.
 	chat.onSend = function (text) {
 		chat.beginPending(text);
 
 		global
-			.fetch("/api/send?t=" + encodeURIComponent(token), {
+			.fetch("/api/send", {
 				method: "POST",
-				headers: { "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					"X-Orchestra-Token": token
+				},
 				body: JSON.stringify({ text: text }),
 			})
 			.then(function (response) {
@@ -486,7 +494,7 @@
 		authCheckTimer = global.setTimeout(function () {
 			authCheckTimer = 0;
 			global
-				.fetch("/api/snapshot?t=" + encodeURIComponent(token), {
+				.fetch("/api/snapshot", {
 					headers: { "X-Orchestra-Token": token },
 				})
 				.then(function (response) {

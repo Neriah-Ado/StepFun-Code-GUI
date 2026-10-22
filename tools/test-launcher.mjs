@@ -10,7 +10,7 @@
  * Usage: node tools/test-launcher.mjs
  */
 import { strict as assert } from "node:assert";
-import { binaryNameFor, openCommandFor, parseArgs, pickBinary } from "../start.mjs";
+import { binaryNameFor, findPanelUrl, openCommandFor, parseArgs, pickBinary } from "../start.mjs";
 
 const checks = [];
 const check = (name, fn) => {
@@ -67,6 +67,19 @@ check("pickBinary returns the first existing candidate", () => {
 	assert.equal(pickBinary(["a", "b", "c"], exists), "b");
 	assert.equal(pickBinary(["a"], () => false), null);
 	assert.equal(pickBinary([], () => true), null);
+});
+
+check("panel URL is scraped with the token in the fragment", () => {
+	const line = "[step-orchestra] panel http://127.0.0.1:47810/#t=0123456789abcdef\n";
+	assert.equal(findPanelUrl(line), "http://127.0.0.1:47810/#t=0123456789abcdef");
+	assert.equal(findPanelUrl("http://127.0.0.1:47811/#t=ab-cd_ef"), "http://127.0.0.1:47811/#t=ab-cd_ef");
+	// An incomplete URL yields null until the tail is reassembled.
+	assert.equal(findPanelUrl("noise http://127.0.0.1:47810/#t="), null);
+	assert.equal(findPanelUrl(""), null);
+});
+
+check("legacy ?t= panel URLs are no longer matched", () => {
+	assert.equal(findPanelUrl("http://127.0.0.1:47810/?t=0123456789abcdef"), null);
 });
 
 let failed = 0;

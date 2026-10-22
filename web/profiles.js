@@ -27,7 +27,9 @@
 		cancel: document.getElementById("pf-cancel"),
 	};
 
-	var token = new URLSearchParams(global.location.search).get("t") || "";
+	// Bootstrapped by token.js from the URL fragment; mutations send it as a
+	// header because the gateway only honours a query token on read-only GETs.
+	var token = global.OrchestraToken || "";
 
 	var profiles = [];
 	var activeId = null;
@@ -44,7 +46,8 @@
 		return node;
 	}
 
-	function url(path) {
+	/** Read-only requests may carry the token in the query string. */
+	function readUrl(path) {
 		return path + (path.indexOf("?") === -1 ? "?" : "&") + "t=" + encodeURIComponent(token);
 	}
 
@@ -200,7 +203,7 @@
 
 	function refresh() {
 		return global
-			.fetch(url("/api/profiles"), { headers: { "X-Orchestra-Token": token } })
+			.fetch(readUrl("/api/profiles"), { headers: { "X-Orchestra-Token": token } })
 			.then(function (response) {
 				return response.ok ? response.json() : null;
 			})
@@ -218,7 +221,7 @@
 		setError("");
 
 		global
-			.fetch(url("/api/profiles/activate"), {
+			.fetch("/api/profiles/activate", {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Orchestra-Token": token },
 				body: JSON.stringify({ id: id }),
@@ -239,7 +242,7 @@
 		if (!global.confirm("删除配置「" + label + "」？此操作不可撤销。")) return;
 
 		global
-			.fetch(url("/api/profiles") + "&id=" + encodeURIComponent(profile.id), {
+			.fetch("/api/profiles?id=" + encodeURIComponent(profile.id), {
 				method: "DELETE",
 				headers: { "X-Orchestra-Token": token },
 			})
@@ -332,7 +335,7 @@
 		setError("");
 
 		global
-			.fetch(url("/api/profiles"), {
+			.fetch("/api/profiles", {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Orchestra-Token": token },
 				body: JSON.stringify(payload),

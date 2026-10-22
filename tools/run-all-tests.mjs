@@ -55,6 +55,10 @@ const steps = [
 		run: () => spawnSync(NODE, [resolve(HERE, "test-launcher.mjs")], { encoding: "utf8" }),
 	},
 	{
+		name: "panel token bootstrap",
+		run: () => spawnSync(NODE, [resolve(HERE, "test-token.mjs")], { encoding: "utf8" }),
+	},
+	{
 		name: "end-to-end (mock feed)",
 		run: () => spawnSync(NODE, [resolve(HERE, "mock-feed.mjs")], { encoding: "utf8", timeout: 120_000 }),
 	},

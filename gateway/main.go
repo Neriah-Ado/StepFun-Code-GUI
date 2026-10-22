@@ -5,8 +5,10 @@
 // over loopback HTTP with a server-sent event stream.
 //
 // Security posture: the listener is bound to 127.0.0.1 only, every data
-// endpoint requires a per-run bearer token, and the working directory is never
-// exposed beyond what the extension explicitly forwards.
+// endpoint requires a per-run bearer token, mutations additionally require a
+// same-origin request with the token in a header (never the URL), and the
+// working directory is never exposed beyond what the extension explicitly
+// forwards.
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,8 +57,10 @@ func main() {
 	}
 
 	// The panel URL is scraped from stdout by the extension and surfaced through
-	// the /orchestra command, so the token never lands in a log file.
-	fmt.Printf("[step-orchestra] panel http://127.0.0.1:%d/?t=%s\n", port, token)
+	// the /orchestra command, so the token never lands in a log file. The token
+	// travels in the URL fragment: it is never sent to a server, never leaks
+	// through Referer, and is stripped from the address bar on load.
+	fmt.Printf("[step-orchestra] panel http://127.0.0.1:%d/#t=%s\n", port, token)
 	fmt.Printf("[step-orchestra] assets %s\n", webDir)
 	_ = os.Stdout.Sync()
 
@@ -216,6 +221,13 @@ func newRouter(store *Store, hub *Hub, actions *actionWriter, token, webDir stri
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// A write can inject a message into an agent with shell access, so it
+		// must be a same-origin browser request (or a local CLI with the token
+		// header) — see sameOriginAllowed.
+		if !sameOriginAllowed(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
 		if !authorized(r, token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -255,6 +267,12 @@ func newRouter(store *Store, hub *Hub, actions *actionWriter, token, webDir stri
 	// Credential roster. GET returns masked views only; the plaintext key is
 	// written here but never read back out over HTTP.
 	mux.HandleFunc("/api/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+			if !sameOriginAllowed(r) {
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
+			}
+		}
 		if !authorized(r, token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -326,6 +344,10 @@ func newRouter(store *Store, hub *Hub, actions *actionWriter, token, webDir stri
 	mux.HandleFunc("/api/profiles/activate", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !sameOriginAllowed(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
 			return
 		}
 		if !authorized(r, token) {
@@ -411,7 +433,52 @@ func newRouter(store *Store, hub *Hub, actions *actionWriter, token, webDir stri
 
 	mux.Handle("/", staticHandler(webDir))
 
-	return mux
+	// The bind address is loopback, but the Host header is caller-controlled;
+	// checking it defeats DNS rebinding against the loopback listener.
+	return guardHost(mux)
+}
+
+// guardHost rejects requests whose Host header is not a loopback name.
+func guardHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "unexpected host", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackHost reports whether a Host/Host:port header names this machine's
+// loopback interface. Anything else is either a proxy or a rebinding attempt.
+func isLoopbackHost(hostport string) bool {
+	host := strings.TrimSpace(hostport)
+	if host == "" {
+		return false
+	}
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
+}
+
+// sameOriginAllowed rejects cross-site writes. A browser POST/DELETE carries an
+// Origin header for the page that issued it; accepting only an Origin whose
+// authority equals the request Host lets the panel write while any other web
+// page cannot, even though it could otherwise reach 127.0.0.1. A missing Origin
+// is a local CLI client — the token header is still required in that case.
+func sameOriginAllowed(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host) && isLoopbackHost(parsed.Host)
 }
 
 // serveEvents streams state deltas. A full snapshot is sent first so a
@@ -487,17 +554,23 @@ func writeJSON(w http.ResponseWriter, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// authorized accepts the token as a query parameter (initial page load) or a
-// header (programmatic clients), always compared in constant time.
+// authorized accepts the token from the X-Orchestra-Token header on any method,
+// and from the query string on read-only GET/HEAD requests only. The initial
+// page load and EventSource cannot set headers, so they need the query form;
+// mutations must use the header, which means a token leaked through a URL
+// (history, Referer, process argv) grants reads at most — never the ability to
+// inject a message or edit credentials. Comparison is always constant-time.
 func authorized(r *http.Request, token string) bool {
 	if token == "" {
 		return true
 	}
-	if provided := r.URL.Query().Get("t"); provided != "" && constantTimeEqual(provided, token) {
-		return true
-	}
 	if header := r.Header.Get("X-Orchestra-Token"); header != "" && constantTimeEqual(header, token) {
 		return true
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if provided := r.URL.Query().Get("t"); provided != "" && constantTimeEqual(provided, token) {
+			return true
+		}
 	}
 	return false
 }
@@ -514,30 +587,67 @@ func constantTimeEqual(a, b string) bool {
 	return diff == 0
 }
 
-// resolveWebDir finds the bundled assets, preferring the explicit override.
+// resolveWebDir finds the bundled assets. Assets are served without a token so
+// the first paint stays one request, which makes the directory itself part of
+// the trust boundary: STEP_ORCHESTRA_WEB may only select the repository's own
+// web/ directory, never an arbitrary path whose contents would then be readable
+// over loopback (including directory listings).
 func resolveWebDir() string {
-	var candidates []string
+	var bundled []string
 
-	if fromEnv := os.Getenv("STEP_ORCHESTRA_WEB"); fromEnv != "" {
-		candidates = append(candidates, fromEnv)
-	}
 	if executable, err := os.Executable(); err == nil {
 		base := filepath.Dir(executable)
-		candidates = append(candidates,
+		bundled = append(bundled,
 			filepath.Join(base, "web"),
 			filepath.Join(base, "..", "web"),
 		)
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(cwd, "..", "web"))
+		bundled = append(bundled, filepath.Join(cwd, "web"))
 	}
 
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
+	if fromEnv := strings.TrimSpace(os.Getenv("STEP_ORCHESTRA_WEB")); fromEnv != "" {
+		if selected, ok := matchBundledWebDir(fromEnv, bundled); ok {
+			return selected
+		}
+		log.Printf("ignoring STEP_ORCHESTRA_WEB=%s: it must point at the bundled web/ directory", fromEnv)
+	}
+
+	for _, candidate := range bundled {
+		if isDirectory(candidate) {
+			return filepath.Clean(candidate)
 		}
 	}
 	return ""
+}
+
+// matchBundledWebDir returns the canonical bundled directory that `wanted`
+// resolves to, or false when it would serve something else.
+func matchBundledWebDir(wanted string, bundled []string) (string, bool) {
+	absolute, err := filepath.Abs(wanted)
+	if err != nil {
+		return "", false
+	}
+	absolute = filepath.Clean(absolute)
+	if !isDirectory(absolute) {
+		return "", false
+	}
+
+	for _, candidate := range bundled {
+		resolved, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		if filepath.Clean(resolved) == absolute {
+			return absolute, true
+		}
+	}
+	return "", false
+}
+
+func isDirectory(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // newRequestID identifies one reverse-channel round trip.

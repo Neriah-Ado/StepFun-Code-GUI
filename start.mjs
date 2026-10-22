@@ -35,6 +35,19 @@ export function binaryNameFor(platform) {
 	return platform === "win32" ? "step-orchestra-gateway.exe" : "step-orchestra-gateway";
 }
 
+/**
+ * The gateway prints exactly one panel URL, with the bearer token in the URL
+ * fragment. A fragment is never sent to a server and never reaches Referer,
+ * unlike the query string this used to be.
+ */
+const PANEL_URL_PATTERN = /https?:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+/;
+
+/** First panel URL found in a chunk of gateway output, or null. */
+export function findPanelUrl(text) {
+	const match = String(text ?? "").match(PANEL_URL_PATTERN);
+	return match ? match[0] : null;
+}
+
 /** The command that opens a URL in the default browser, per platform. */
 export function openCommandFor(platform, url) {
 	if (platform === "win32") {
@@ -171,9 +184,9 @@ function launchGateway(root, options) {
 			process.stdout.write(chunk);
 			if (url) return;
 			stdoutTail = (stdoutTail + chunk).slice(-2048);
-			const match = stdoutTail.match(/https?:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/);
-			if (match) {
-				url = match[0];
+			const found = findPanelUrl(stdoutTail);
+			if (found) {
+				url = found;
 				if (!options.noOpen) openBrowser(url);
 				console.log("[start] 浏览器已打开面板;若未弹出,请手动访问上面的地址。");
 				console.log("[start] 数据需要 Step Code 会话驱动:安装扩展后在 Step Code 中运行 /orchestra。");
@@ -214,9 +227,9 @@ function launchDemo(root, options) {
 			process.stdout.write(chunk);
 			if (url) return;
 			buffer = (buffer + chunk).slice(-4096);
-			const match = buffer.match(/https?:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/);
-			if (match) {
-				url = match[0];
+			const found = findPanelUrl(buffer);
+			if (found) {
+				url = found;
 				if (!options.noOpen) openBrowser(url);
 				console.log("[start] 演示面板已在浏览器打开。");
 			}

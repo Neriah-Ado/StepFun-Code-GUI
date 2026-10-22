@@ -38,8 +38,9 @@ const AUTOBUILD_DISABLED = /^(0|false|off)$/i.test(process.env.STEP_ORCHESTRA_AU
 /** Rebuild attempts are rate-limited so a broken toolchain cannot spawn `go` in a loop. */
 const AUTOBUILD_COOLDOWN_MS = 30_000;
 
-/** The gateway prints exactly one such line on startup. */
-const PANEL_URL_PATTERN = /https?:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/;
+/** The gateway prints exactly one such line on startup. The token sits in the
+ * URL fragment so it never travels to a server or leaks through Referer. */
+const PANEL_URL_PATTERN = /https?:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+/;
 
 export class Bridge {
 	private child: ChildProcess | null = null;
