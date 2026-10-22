@@ -3,8 +3,9 @@
 > 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 > 只记录用户可感知的变更；详尽说明见 `docs/releases/`，版本索引见 [README.md](README.md)。
 
-> v2.0.0 发布后另有安全加固（面板 token 仅经 URL 片段 `#t=` 传递、写操作增加 `Origin` 校验），
-> 详见 README「安全设计」；该部分待下个版本归档。
+> v2.0.0 发布后另有安全加固：面板 token 仅经 URL 片段 `#t=` 传递、写操作增加 `Origin` 校验，
+> 端到端断言增至 38 项（含读写鉴权、跨站 `Origin`、静态资源校验）；详见 README「安全设计」，
+> 该部分待下个版本归档。
 
 ## [2.0.0] - 2026-10-02
 
@@ -18,7 +19,6 @@
 
 ### 变更
 
-- 端到端断言由 33 项增至 38 项，新增读写鉴权、跨站 `Origin` 与静态资源校验。
 - `npm test` 依次执行 go vet、go test、模块图、载荷解析、层叠校验、启动器与端到端测试，任一步失败即非零退出。
 
 ## [1.5.0] - 2026-09-27
