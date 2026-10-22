@@ -48,7 +48,7 @@ npm run demo        # 等价于 node start.mjs --demo
 ```
 
 回放一组完整场景（workflow 并行扇出 + subagent 串行链 + 对话流 + 用量指标），
-用于快速查看面板效果；回放完成后断言 33/33 输出，网关保持运行供浏览。
+用于快速查看面板效果；回放完成后断言 38/38 输出，网关保持运行供浏览。
 
 **方式三（开发者，手动构建）：**
 
@@ -71,8 +71,14 @@ step list
 安装完成后，在 Step Code 中执行 `/orchestra`，将输出面板地址：
 
 ```
-[step-orchestra] panel: http://127.0.0.1:47810/?t=<token>
+[step-orchestra] panel: http://127.0.0.1:47810/#t=<token>
 ```
+
+token 位于 URL **片段**（`#t=`），不会发送给服务器、不会进入 `Referer`；
+页面加载后 `web/token.js` 会立即用 `history.replaceState` 把地址栏还原为
+`http://127.0.0.1:47810/`，并按标签页保存在 `sessionStorage` 中，因此刷新可用、
+复制出的地址不含密钥。**v2.0.0 及更早版本的 `?t=` 地址不再可用**，请重新运行
+`/orchestra` 获取新地址。
 
 网关随扩展加载自动启动，并在会话结束时退出，无需额外配置。
 
@@ -144,12 +150,16 @@ thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈�
 
 | 项 | 措施 |
 |---|---|
-| 网络暴露 | 仅绑定 `127.0.0.1`，端口冲突时自动顺延（至多 12 次） |
-| 鉴权 | 每次运行生成 24 字节随机 token，`/events` 与 `/api/snapshot` 均予校验，采用常数时间比较 |
+| 网络暴露 | 仅绑定 `127.0.0.1`，端口冲突时自动顺延（至多 12 次）；并校验 `Host` 必须为 `127.0.0.1` / `localhost`，阻断 DNS rebinding |
+| 鉴权 | 每次运行生成 24 字节随机 token；所有数据端点校验，采用常数时间比较 |
+| token 传递 | token 只放在 URL 片段（`#t=`），页面读取后立即从地址栏与历史记录中清除；只读 GET 额外接受查询参数，`POST` / `DELETE` **只接受 `X-Orchestra-Token` 请求头**，因此从 UI 地址泄露的 token 无法用于写操作 |
+| 跨站写保护 | `POST` / `DELETE` 校验 `Origin`：缺失视为本地 CLI（仍需 token 头），存在则必须与请求 `Host` 完全一致，否则返回 403 |
+| 静态资源 | 无 token 校验（首屏无需额外请求），但只服务仓库内 `web/`；`STEP_ORCHESTRA_WEB` 若指向其他目录会被忽略并记日志，避免把任意目录暴露到回环地址 |
 | 凭据泄露 | 参数经 `redact.ts` 处理：`key` / `token` / `secret` / `password` / `authorization` / `cookie` 等键整值替换为 `***` |
 | 体积膨胀 | 单字符串截断至 2048 字符，每层至多 24 个键，递归深度上限为 4 |
 | 注入 | 前端一律以 `textContent` 写入宿主数据；`innerHTML` 仅用于本文件内声明的静态图标路径 |
-| 数据落盘 | 不写入任何文件；token 仅在扩展内存中流转 |
+| 数据落盘 | 网关不写浏览数据；token 仅在扩展进程内存与浏览器同标签的 `sessionStorage` 中流转 |
+| 首次自动构建 | 扩展/启动器在二进制缺失时调用本机 Go 构建**仓库内源码**：不联网、不启用 shell、不拼接参数；等价于“安装即执行该仓库”，属安装信任模型（见「已知限制」） |
 
 ---
 
@@ -210,11 +220,22 @@ thinking 与 toolcall 增量不予转发，因其已以工具节点的形式呈�
 | 项 | 决定 |
 |---|---|
 | 位置 | `~/.stepcode/agent/step-orchestra/profiles.json`（由网关写入） |
-| 权限 | 目录 `0700`、文件 `0600`；Windows 平台为尽力而为，由 ACL 兜底 |
+| 权限 | 目录 `0700`、文件 `0600`；**Windows 上这两个权限位不生效**，同机其他账户是否可读由 `%USERPROFILE%` 的 ACL 决定 |
 | 原子性 | 先写入 `.tmp` 再 rename，崩溃不会截断原文件 |
 | 格式 | `{ version, activeId, profiles: [{ id, name, provider, apiKey, baseUrl?, addedAt }] }` |
 | 加密 | **不加密**。与 `.netrc`、`~/.aws/credentials` 采取同级做法：明文存储并依赖文件权限 |
 | 浏览器 | **不接触明文**。列表接口仅返回 `keyHint`（形如 `sk-m…7890`） |
+
+> **Windows 权限说明（A-03）**：Go 的 `os.WriteFile(..., 0o600)` 与 `MkdirAll(..., 0o700)`
+> 在 Windows 上只会映射为只读属性，不会生成 ACL 条目；`profiles.json` 的机密性因此取决于
+> `%USERPROFILE%\.stepcode\` 的继承 ACL（默认仅当前用户与其管理员组可读）。若需显式收紧，可执行：
+>
+> ```bat
+> icacls "%USERPROFILE%\.stepcode\agent\step-orchestra" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F
+> ```
+>
+> 本项目不引入 DPAPI / Keychain 等平台凭据库（与“零第三方依赖”取向冲突），如需更高保证
+> 请使用系统凭据管理器保存密钥，并仅在面板中临时激活。
 
 选择由网关持有明文，而不使用浏览器 localStorage：localStorage 对同源脚本完全可读，
 而面板本身运行于 localhost，将密钥置于浏览器等同于交付给任意注入脚本。
@@ -358,6 +379,7 @@ step-orchestra/
 │   └── hub.go           #   SSE 广播
 ├── web/                 # 浏览器面板（零构建，原生 HTML/CSS/JS）
 │   ├── perf.js          #   性能模式：自动检测 / 持久化 / 后台休眠（V2.0 新增）
+│   ├── token.js         #   面板 token 引导：读取 URL 片段、清除地址栏、sessionStorage
 │   ├── liquid-glass.css #   设计系统 + 视图栈 + 切换按钮 + 配置面板 + perf-lite
 │   ├── glass.js         #   指针高光 / 视差倾斜（性能模式下跳过）
 │   ├── tree.js          #   编排树渲染（增量复用）
@@ -370,6 +392,7 @@ step-orchestra/
     ├── mock-feed.mjs    # 端到端验证（编排 + 对话 + 反向通道 + 凭据 + 用量）
     ├── test-progress.mjs#   宿主载荷解析回归
     ├── test-launcher.mjs#   启动器单元回归（V2.0 新增）
+    ├── test-token.mjs   #   面板 token 引导回归（fragment / 地址栏 / sessionStorage）
     ├── test-extension-import.mjs # 扩展模块图冒烟（V2.0 新增）
     ├── run-all-tests.mjs#   聚合入口，支持 --rounds 多轮（V2.0 新增）
     └── check-layers.mjs # 层叠关系静态校验
@@ -390,10 +413,11 @@ step-orchestra/
 | 自动发现（`step install` → `config.toml`） | 已实测（`step list` 确认） |
 | 扩展生命周期钩子 | 已实测（`session_shutdown` 后网关优雅退出，无残留进程） |
 | 端口冲突自动避让 | 已实测（47810 被占用时顺延至 47811） |
-| 网关与前端数据链路（编排 / 对话 / 反向通道 / 凭据 / 用量） | `tools/mock-feed.mjs` **33/33** 断言 |
+| 网关与前端数据链路（编排 / 对话 / 反向通道 / 凭据 / 用量） | `tools/mock-feed.mjs` **38/38** 断言（含读写鉴权、跨站 Origin、静态资源） |
 | 宿主载荷解析 | `tools/test-progress.mjs` 11/11 断言 |
 | 网关状态机（生命周期 / 逐出 / 占位 / 序号 / 统计） | `gateway/state_test.go` 6 组 `go test`（V2.0 新增） |
-| 启动器决策逻辑（平台命名 / 参数 / 候选解析） | `tools/test-launcher.mjs` 6/6 断言（V2.0 新增） |
+| 启动器决策逻辑（平台命名 / 参数 / 候选解析 / fragment URL 抓取） | `tools/test-launcher.mjs` 8/8 断言（V2.0 新增） |
+| 面板 token 引导（片段解析 / 地址栏清除 / sessionStorage 回退） | `tools/test-token.mjs` 6/6 断言 |
 | 扩展模块图加载与导出面 | `tools/test-extension-import.mjs`（V2.0 新增） |
 | 凭据持久化落盘 | 已实测，`profiles.json` 写入且包含密钥 |
 | 明文密钥不外泄至浏览器 | 已实测，响应体不含明文 |
@@ -431,6 +455,8 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 - **扇出仅一层。** 此为 Step Code 的约束，因此树最深两层。
 - **首次构建需 Go 工具链。** 二进制不随仓库分发（`bin/` 不入库）；
   扩展侧与启动器均会自动构建，但机器上仍需安装 Go（https://go.dev/dl）。
+- **首次构建属安装信任模型。** 构建只执行仓库内 Go 源码（不联网、不启用 shell、不拼接参数），
+  但“安装该仓库”本身等价于“在本机执行其源码”，请只安装可信来源。
 - **端口固定于 47810–47821。** 全部占用时启动失败，并在 `/orchestra` 中给出原因。
 
 ---
@@ -441,7 +467,8 @@ node tools/check-layers.mjs      # 静态判定，11 项断言
 |---|---|
 | `/orchestra` 提示 binary missing / Go 不可用 | 双击 `start.bat`（或 `npm start`）一次；或安装 Go 后运行 `/orchestra` 触发自动构建 |
 | 双击 start.bat 闪退 | 未安装 Node.js ≥ 22，从 https://nodejs.org 安装后重试 |
-| 面板持续显示「连接中」 | 检查 URL 中 `t` 参数是否完整；token 每次运行均会变化 |
+| 面板持续显示「连接中」 | 检查地址中的 `#t=` 片段是否完整；token 每次运行均会变化。页面加载后地址栏中的 `#t=` 会被清除，属正常现象 |
+| 使用旧 `?t=` 地址 | v2.0.0 及更早的查询串地址已失效；重新运行 `/orchestra`，使用输出的 `#t=` 新地址 |
 | 面板显示「会话已失效」 | 网关进程已重启并更换了 token，重新运行 `/orchestra` 打印新地址后打开 |
 | 节点未出现 | 确认触发的是 `subagent` / `workflow`；普通工具调用需关闭「仅编排」筛选 |
 | 端口被占用 | 通过 `STEP_ORCHESTRA_PORT=50000` 环境变量覆盖起始端口，或 `npm start -- --port 50000` |

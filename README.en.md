@@ -51,7 +51,7 @@ npm run demo        # equivalent to node start.mjs --demo
 ```
 
 Replays a complete scenario (a parallel workflow fan-out, a subagent chain, live chat
-and usage metrics) so the panel can be evaluated in isolation; the 33/33 assertion
+and usage metrics) so the panel can be evaluated in isolation; the 38/38 assertion
 report prints and the gateway stays up for browsing.
 
 **Option 3 (developers, manual build):**
@@ -76,8 +76,14 @@ step list
 Once installed, run `/orchestra` inside Step Code to print the panel address:
 
 ```
-[step-orchestra] panel: http://127.0.0.1:47810/?t=<token>
+[step-orchestra] panel: http://127.0.0.1:47810/#t=<token>
 ```
+
+The token sits in the URL **fragment** (`#t=`), so it is never sent to the server and never
+leaks through `Referer`. On load, `web/token.js` rewrites the address bar back to
+`http://127.0.0.1:47810/` with `history.replaceState` and keeps the token for the tab in
+`sessionStorage`, so a refresh still works and a copied URL carries no secret.
+**`?t=` addresses from v2.0.0 and earlier no longer work** — rerun `/orchestra` for the new URL.
 
 The gateway starts automatically when the extension loads and exits when the session ends;
 no further configuration is required.
@@ -154,12 +160,16 @@ It does not depend on an explicit `mode` field.
 
 | Item | Measure |
 |---|---|
-| Network exposure | Bound to `127.0.0.1` only; port conflicts resolve by incrementing (up to 12 attempts) |
-| Authentication | A 24-byte random token per run; `/events` and `/api/snapshot` both validate it using constant-time comparison |
+| Network exposure | Bound to `127.0.0.1` only; port conflicts resolve by incrementing (up to 12 attempts). The `Host` header must also name `127.0.0.1` / `localhost`, defeating DNS rebinding |
+| Authentication | A 24-byte random token per run; every data endpoint validates it using constant-time comparison |
+| Token transport | The token lives only in the URL fragment (`#t=`), which is stripped from the address bar and history as soon as it is read. Read-only GETs may also use the query string; `POST` / `DELETE` accept **only** the `X-Orchestra-Token` header, so a token leaked from a URL cannot authorize a mutation |
+| Cross-site write protection | `POST` / `DELETE` validate `Origin`: absent means a local CLI (the token header still applies), present must equal the request `Host` exactly — anything else is 403 |
+| Static assets | Untokened (so the first paint costs one request) but restricted to the repository's `web/`: a `STEP_ORCHESTRA_WEB` pointing elsewhere is ignored with a log line, so an arbitrary directory is never exposed over loopback |
 | Credential leakage | Arguments pass through `redact.ts`: values under `key` / `token` / `secret` / `password` / `authorization` / `cookie` are replaced wholesale with `***` |
 | Payload growth | Strings truncate at 2048 characters, at most 24 keys per level, recursion depth capped at 4 |
 | Injection | The front end writes host data exclusively through `textContent`; `innerHTML` is used only for static icon paths declared in-file |
-| Data at rest | No files are written; tokens exist only in extension memory |
+| Data at rest | The gateway writes no browsing data; the token lives only in the extension process memory and the browser tab's `sessionStorage` |
+| First auto-build | When the binary is missing, the extension/launcher runs the local Go build on **repository source**: no network, no shell, no argument concatenation. It is equivalent to "installing means executing this repository" — an install trust model (see Known limitations) |
 
 ---
 
@@ -224,11 +234,25 @@ Switch between multiple accounts' coding plans without restarting.
 | Item | Decision |
 |---|---|
 | Location | `~/.stepcode/agent/step-orchestra/profiles.json` (written by the gateway) |
-| Permissions | Directory `0700`, file `0600`; best effort on Windows, where ACLs govern |
+| Permissions | Directory `0700`, file `0600`; **neither bit has any effect on Windows**, where readability by other local accounts is governed by the ACL on `%USERPROFILE%` |
 | Atomicity | Written to `.tmp` then renamed, so a crash cannot truncate the original |
 | Format | `{ version, activeId, profiles: [{ id, name, provider, apiKey, baseUrl?, addedAt }] }` |
 | Encryption | **None.** The same approach as `.netrc` and `~/.aws/credentials`: plaintext plus file permissions |
 | Browser | **Never sees plaintext.** The list endpoint returns only `keyHint` (for example `sk-m…7890`) |
+
+> **Windows permissions (A-03)**: `os.WriteFile(..., 0o600)` and `MkdirAll(..., 0o700)` only map
+> to the read-only attribute on Windows; they create no ACL entries. The confidentiality of
+> `profiles.json` therefore depends on the inherited ACL of `%USERPROFILE%\.stepcode\` (by
+> default readable only by the current user and their administrators group). To tighten it
+> explicitly:
+>
+> ```bat
+> icacls "%USERPROFILE%\.stepcode\agent\step-orchestra" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F
+> ```
+>
+> This project deliberately avoids platform credential stores (DPAPI / Keychain / libsecret) to
+> stay dependency-free; for a stronger guarantee, keep keys in the OS credential manager and
+> activate them in the panel only temporarily.
 
 Plaintext is held by the gateway rather than in browser localStorage because localStorage is
 fully readable by same-origin scripts, and the panel itself runs on localhost. Placing a key
@@ -380,6 +404,7 @@ step-orchestra/
 │   └── hub.go           #   SSE broadcast
 ├── web/                 # Browser panel (no build step, plain HTML/CSS/JS)
 │   ├── perf.js          #   Performance mode: auto-detect / persist / background idle (new in V2.0)
+│   ├── token.js         #   Panel token bootstrap: read URL fragment, clean the address bar, sessionStorage
 │   ├── liquid-glass.css #   Design system + view stack + switch + profile popover + perf-lite
 │   ├── glass.js         #   Pointer highlight / parallax tilt (skipped in performance mode)
 │   ├── tree.js          #   Orchestration tree rendering (incremental reuse)
@@ -392,6 +417,7 @@ step-orchestra/
     ├── mock-feed.mjs    # End-to-end verification (orchestration, chat, reverse channel, credentials, usage)
     ├── test-progress.mjs# Host payload parsing regression
     ├── test-launcher.mjs# Launcher unit regression (new in V2.0)
+    ├── test-token.mjs   # Panel token bootstrap regression (fragment / address bar / sessionStorage)
     ├── test-extension-import.mjs # Extension module-graph smoke test (new in V2.0)
     ├── run-all-tests.mjs# Aggregated entry, supports --rounds (new in V2.0)
     └── check-layers.mjs # Static stacking-order check
@@ -412,10 +438,11 @@ Aggregated entry: `npm test` (or `node tools/run-all-tests.mjs --rounds 3` for a
 | Automatic discovery (`step install` → `config.toml`) | Verified (`step list`) |
 | Extension lifecycle hooks | Verified (gateway exits cleanly after `session_shutdown`, no orphan processes) |
 | Port conflict fallback | Verified (47810 in use, falls through to 47811) |
-| Gateway ↔ front-end link (orchestration / chat / reverse channel / credentials / usage) | `tools/mock-feed.mjs` **33/33** assertions |
+| Gateway ↔ front-end link (orchestration / chat / reverse channel / credentials / usage) | `tools/mock-feed.mjs` **38/38** assertions (including read/write auth, cross-site Origin, static assets) |
 | Host payload parsing | `tools/test-progress.mjs` 11/11 assertions |
 | Gateway state machine (lifecycle / eviction / placeholder / sequence / stats) | `gateway/state_test.go`, 6 `go test` groups (new in V2.0) |
-| Launcher decision logic (platform naming / flags / candidate resolution) | `tools/test-launcher.mjs` 6/6 assertions (new in V2.0) |
+| Launcher decision logic (platform naming / flags / candidate resolution / fragment URL scraping) | `tools/test-launcher.mjs` 8/8 assertions (new in V2.0) |
+| Panel token bootstrap (fragment parsing / address-bar cleanup / sessionStorage fallback) | `tools/test-token.mjs` 6/6 assertions |
 | Extension module graph loads, export surface holds | `tools/test-extension-import.mjs` (new in V2.0) |
 | Credential persistence to disk | Verified; `profiles.json` written and contains the key |
 | Plaintext key never reaches the browser | Verified; response bodies contain no plaintext |
@@ -458,6 +485,9 @@ narrowing the window below 1080 px (where `.stage` collapses to a single column)
 - **The first build needs the Go toolchain.** Binaries are not distributed in the repository
   (`bin/` is not committed); both the extension and the launcher build automatically, but Go
   (https://go.dev/dl) must still be installed on the machine.
+- **The first build is an install trust model.** It only executes repository source (no network,
+  no shell, no argument concatenation), but installing the repository is equivalent to executing
+  its source locally — install only trusted sources.
 - **Ports are confined to 47810–47821.** If all are taken, startup fails and `/orchestra`
   reports the reason.
 
@@ -469,7 +499,9 @@ narrowing the window below 1080 px (where `.stage` collapses to a single column)
 |---|---|
 | `/orchestra` reports a missing binary / Go unavailable | Run `start.bat` (or `npm start`) once; or install Go and run `/orchestra` again to trigger the auto-build |
 | start.bat closes instantly | Node.js ≥ 22 is not installed; install it from https://nodejs.org and retry |
-| Panel is stuck on "connecting" | Check that the `t` parameter in the URL is intact; the token changes on every run |
+| Panel is stuck on "connecting" | Check that the `#t=` fragment is intact; the token changes on every run. The address bar drops `#t=` after load — that is expected |
+| Using an old `?t=` address | Query-string addresses from v2.0.0 and earlier are dead; rerun `/orchestra` and open the new `#t=` URL |
+| Panel shows "session expired" | The gateway restarted with a fresh token; rerun `/orchestra` and open the newly printed address |
 | No nodes appear | Confirm the run uses `subagent` / `workflow`; ordinary tool calls require turning off the "orchestration only" filter |
 | Port already in use | Override the starting port with `STEP_ORCHESTRA_PORT=50000`, or `npm start -- --port 50000` |
 | Custom gateway path | Override with `STEP_ORCHESTRA_BIN=/path/to/gateway` |
